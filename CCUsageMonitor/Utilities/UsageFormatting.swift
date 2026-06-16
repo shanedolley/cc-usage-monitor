@@ -57,8 +57,4 @@ enum UsageMetricSummary {
             .compactMap { name, value in value.map { (name, $0) } }
             .max { $0.1 < $1.1 }
     }
-
-    static func highestUtilization(_ usage: UsageResponse) -> Double? {
-        highestMetric(usage)?.utilization
-    }
 }

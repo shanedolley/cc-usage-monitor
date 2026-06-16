@@ -23,6 +23,8 @@ enum ResetFormatter {
             let minutes = totalMinutes % 60
             if hours > 0, minutes > 0 { return "Resets in \(hours) hr \(minutes) min" }
             if hours > 0 { return "Resets in \(hours) hr" }
+            // Sub-minute remainder truncates to zero; avoid the misleading "Resets in 0 min".
+            if minutes == 0 { return "Resets in under a minute" }
             return "Resets in \(minutes) min"
         }
 

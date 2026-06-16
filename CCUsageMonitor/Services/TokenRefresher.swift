@@ -13,10 +13,15 @@ struct TokenRefreshResponse: Decodable, Equatable {
         case expiresIn = "expires_in"
     }
 
+    /// Used when the server omits `expires_in`. A zero fallback would mark the new token
+    /// expired on arrival, so `isExpired` would be true on the next poll and the app would
+    /// refresh every cycle forever; one hour is a safe, conservative lifetime instead.
+    static let fallbackLifetime: TimeInterval = 3600
+
     /// Builds the new credential, carrying over scopes and subscription type, and reusing
     /// the previous refresh token when the server did not return a new one.
     func applied(to previous: KeychainCredential, now: Date) -> KeychainCredential {
-        let expiresAtMillis = (now.timeIntervalSince1970 + (expiresIn ?? 0)) * 1000
+        let expiresAtMillis = (now.timeIntervalSince1970 + (expiresIn ?? Self.fallbackLifetime)) * 1000
         return KeychainCredential(
             accessToken: accessToken,
             refreshToken: refreshToken ?? previous.refreshToken,
@@ -37,6 +42,10 @@ struct TokenRefresher: TokenRefreshing {
     let userAgent: String
     private let transport: Transport
 
+    /// An ephemeral session so a token-bearing response is never persisted to the on-disk
+    /// URL cache (NFR-004). Tests inject their own transport and never touch this.
+    private static let session = URLSession(configuration: .ephemeral)
+
     init(endpoint: URL = URL(string: "https://console.anthropic.com/v1/oauth/token")!,
          clientID: String = "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
          userAgent: String = "cc-usage-monitor/1.0",
@@ -44,7 +53,7 @@ struct TokenRefresher: TokenRefreshing {
         self.endpoint = endpoint
         self.clientID = clientID
         self.userAgent = userAgent
-        self.transport = transport ?? { try await URLSession.shared.data(for: $0) }
+        self.transport = transport ?? { try await Self.session.data(for: $0) }
     }
 
     func refresh(using credential: KeychainCredential, now: Date) async throws -> KeychainCredential {

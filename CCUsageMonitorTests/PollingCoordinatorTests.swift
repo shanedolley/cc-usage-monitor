@@ -22,9 +22,9 @@ private struct FakeToken: AccessTokenProviding {
 }
 
 /// Returns a different usage result on each fetch, so a 401-then-success retry can be tested.
-private final class SequencedAPI: APIClientProtocol, @unchecked Sendable {
+/// An actor so its mutable sequence is async-safe without manual locking.
+private actor SequencedAPI: APIClientProtocol {
     let profile: Result<ProfileResponse, Error>
-    private let lock = NSLock()
     private var usageResults: [Result<UsageResponse, Error>]
 
     init(profile: Result<ProfileResponse, Error>, usage: [Result<UsageResponse, Error>]) {
@@ -34,10 +34,65 @@ private final class SequencedAPI: APIClientProtocol, @unchecked Sendable {
 
     func fetchProfile(accessToken: String) async throws -> ProfileResponse { try profile.get() }
     func fetchUsage(accessToken: String) async throws -> UsageResponse {
-        lock.lock(); defer { lock.unlock() }
         let next = usageResults.first ?? usageResults.last!
         if usageResults.count > 1 { usageResults.removeFirst() }
         return try next.get()
+    }
+}
+
+/// Fails the usage call with 401 unless the request carries the force-refreshed token, so a
+/// test can prove the retry actually used `refreshedAccessToken()` and not the original. An
+/// actor so its recorded tokens are async-safe without manual locking.
+private actor TokenAwareAPI: APIClientProtocol {
+    let profile: Result<ProfileResponse, Error>
+    let refreshedToken: String
+    let usageOnRefreshed: UsageResponse
+    private(set) var seenTokens: [String] = []
+
+    init(profile: Result<ProfileResponse, Error>, refreshedToken: String, usage: UsageResponse) {
+        self.profile = profile
+        self.refreshedToken = refreshedToken
+        self.usageOnRefreshed = usage
+    }
+
+    func fetchProfile(accessToken: String) async throws -> ProfileResponse { try profile.get() }
+    func fetchUsage(accessToken: String) async throws -> UsageResponse {
+        seenTokens.append(accessToken)
+        if accessToken == refreshedToken { return usageOnRefreshed }
+        throw APIError.unauthorized
+    }
+}
+
+/// A token provider whose `validAccessToken()` blocks until released, so a test can start one
+/// poll, suspend it mid-flight, fire a second poll, and assert the second one is ignored. An
+/// actor so its state is async-safe without manual locking.
+private actor GatedToken: AccessTokenProviding {
+    private(set) var validCalls = 0
+    private var entered = false
+    private var released = false
+    private var enterCont: CheckedContinuation<Void, Never>?
+    private var releaseCont: CheckedContinuation<Void, Never>?
+
+    func validAccessToken() async throws -> String {
+        validCalls += 1
+        entered = true
+        enterCont?.resume(); enterCont = nil
+        if !released {
+            await withCheckedContinuation { releaseCont = $0 }
+        }
+        return "token"
+    }
+
+    func refreshedAccessToken() async throws -> String { "token" }
+
+    func waitUntilEntered() async {
+        if entered { return }
+        await withCheckedContinuation { enterCont = $0 }
+    }
+
+    func release() {
+        released = true
+        releaseCont?.resume(); releaseCont = nil
     }
 }
 
@@ -142,14 +197,38 @@ final class PollingCoordinatorTests: XCTestCase {
     }
 
     func test401ForcesRefreshAndRetrySucceeds() async {
-        let api = SequencedAPI(profile: .success(emptyProfile()),
-                               usage: [.failure(APIError.unauthorized), .success(usage(42))])
-        let coordinator = makeCoordinator(api: api)
+        // The API rejects the original token and accepts only the force-refreshed one, so this
+        // fails if the retry used validAccessToken() instead of refreshedAccessToken().
+        let api = TokenAwareAPI(profile: .success(emptyProfile()),
+                                refreshedToken: "fresh", usage: usage(42))
+        let token = FakeToken(result: .success("stale"), refreshResult: .success("fresh"))
+        let coordinator = makeCoordinator(api: api, token: token)
 
         await coordinator.poll()
 
         XCTAssertEqual(coordinator.status, .live, "a refreshed token recovers from a mid-flight 401")
         XCTAssertEqual(coordinator.snapshot?.usage.fiveHour?.utilization, 42)
+        let seen = await api.seenTokens
+        XCTAssertEqual(seen, ["stale", "fresh"],
+                       "the retry must use the force-refreshed token, not the original")
+    }
+
+    func testReentrantPollIsIgnoredWhileOneIsInFlight() async {
+        let api = FakeAPI(profile: .success(emptyProfile()), usage: .success(usage(7)))
+        let token = GatedToken()
+        let coordinator = makeCoordinator(api: api, token: token)
+
+        // Start a poll that blocks inside the token provider, then fire a second poll while the
+        // first is suspended: the guard must drop it (no second token read).
+        let first = Task { await coordinator.poll() }
+        await token.waitUntilEntered()
+        await coordinator.poll()
+        let calls = await token.validCalls
+        XCTAssertEqual(calls, 1, "a reentrant poll is ignored while one is in flight")
+
+        await token.release()
+        await first.value
+        XCTAssertEqual(coordinator.status, .live)
     }
 
     func test401ThatPersistsAfterRefreshShowsReauthenticate() async {

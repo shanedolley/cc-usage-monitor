@@ -44,6 +44,7 @@ final class PollingCoordinator: ObservableObject {
     private var pollTask: Task<Void, Never>?
     private let pathMonitor = NWPathMonitor()
     private var isOnline = true
+    private var isPolling = false
     private var wakeObserver: NSObjectProtocol?
 
     init(api: APIClientProtocol,
@@ -75,7 +76,18 @@ final class PollingCoordinator: ObservableObject {
     }
 
     /// One fetch cycle. Directly testable: callers can invoke it and assert the published state.
+    ///
+    /// Reentrancy guard: the wake and reconnect handlers can each fire a `poll()` while the
+    /// periodic one is suspended on the network. Two overlapping cycles would interleave their
+    /// writes to `status` and `nextDelay`, so a later success could erase the 429 backoff the
+    /// first cycle just set. The guard drops the redundant call; the in-flight cycle already
+    /// produces fresh state. The flag is set before the first `await`, so on the main actor
+    /// no second cycle can slip past it.
     func poll() async {
+        guard !isPolling else { return }
+        isPolling = true
+        defer { isPolling = false }
+
         nextDelay = interval   // default for this cycle; only a 429 below raises it
         guard isOnline else {
             status = (snapshot == nil) ? .offline : .stale

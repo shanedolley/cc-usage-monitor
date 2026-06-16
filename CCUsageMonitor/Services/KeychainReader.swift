@@ -8,35 +8,12 @@ struct KeychainReader: KeychainReading {
     let service: String
     let account: String
 
-    init(service: String = "Claude Code-credentials", account: String = NSUserName()) {
+    init(service: String = KeychainItem.defaultService, account: String = KeychainItem.defaultAccount) {
         self.service = service
         self.account = account
     }
 
     func readCredential() throws -> KeychainCredential {
-        try KeychainCredentialParser.parse(readData())
-    }
-
-    private func readData() throws -> Data {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        switch status {
-        case errSecSuccess:
-            guard let data = item as? Data else { throw KeychainError.invalidData }
-            return data
-        case errSecItemNotFound:
-            throw KeychainError.itemNotFound
-        case errSecAuthFailed, errSecInteractionNotAllowed, errSecUserCanceled:
-            throw KeychainError.accessDenied
-        default:
-            throw KeychainError.unexpectedStatus(status)
-        }
+        try KeychainCredentialParser.parse(KeychainItem.readData(service: service, account: account))
     }
 }

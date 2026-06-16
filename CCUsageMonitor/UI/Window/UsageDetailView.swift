@@ -22,10 +22,11 @@ struct UsageDetailView: View {
             Text("Claude Code Usage").font(.headline)
             Spacer()
             if let tier = coordinator.snapshot?.profile.organization?.rateLimitTier {
-                Text(PlanTierFormatter.format(tier))
+                let formatted = PlanTierFormatter.format(tier)
+                Text(formatted)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .accessibilityLabel("Plan \(PlanTierFormatter.format(tier))")
+                    .accessibilityLabel("Plan \(formatted)")
             }
         }
     }

@@ -21,13 +21,17 @@ struct APIClient: APIClientProtocol {
     let userAgent: String
     private let transport: Transport
 
+    /// An ephemeral session so a token-bearing response is never persisted to the on-disk
+    /// URL cache (NFR-004). Tests inject their own transport and never touch this.
+    private static let session = URLSession(configuration: .ephemeral)
+
     init(baseURL: URL = URL(string: "https://api.anthropic.com")!,
          userAgent: String = "cc-usage-monitor/1.0",
          transport: Transport? = nil) {
         self.baseURL = baseURL
         self.userAgent = userAgent
         self.transport = transport ?? { request in
-            try await URLSession.shared.data(for: request)
+            try await Self.session.data(for: request)
         }
     }
 

@@ -44,6 +44,22 @@ final class TokenRefresherTests: XCTestCase {
         XCTAssertEqual(cred.refreshToken, "old_rt", "no rotation: previous refresh token reused")
     }
 
+    func testMissingExpiresInDoesNotMarkTokenImmediatelyExpired() async throws {
+        // No expires_in in the body. A zero fallback would set expiry to `now`, so isExpired
+        // would be true on the next poll and the app would refresh every cycle forever.
+        let body = Data(#"{"access_token": "new_at"}"#.utf8)
+        let refresher = TokenRefresher(endpoint: endpoint, transport: { _ in
+            (body, HTTPURLResponse(url: self.endpoint, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        })
+        let now = Date(timeIntervalSince1970: 1_000_000)
+
+        let cred = try await refresher.refresh(using: previous(), now: now)
+
+        XCTAssertEqual(cred.expiresAt, (1_000_000 + TokenRefreshResponse.fallbackLifetime) * 1000,
+                       "now + fallback lifetime, in ms")
+        XCTAssertFalse(cred.isExpired(now: now), "a freshly refreshed token must not read as expired")
+    }
+
     func testInvalidGrantMapsToUnauthorized() async {
         let body = Data(#"{"error":"invalid_grant"}"#.utf8)
         let refresher = TokenRefresher(endpoint: endpoint, transport: { _ in

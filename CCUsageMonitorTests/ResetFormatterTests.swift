@@ -26,6 +26,13 @@ final class ResetFormatterTests: XCTestCase {
         XCTAssertEqual(ResetFormatter.format(resetsAt: Date(timeIntervalSince1970: 0), now: now), "Resets now")
     }
 
+    func testSubMinuteAvoidsZeroMinutes() {
+        let now = Date(timeIntervalSince1970: 0)
+        // 40 seconds left truncates to 0 minutes; it must not read "Resets in 0 min".
+        XCTAssertEqual(ResetFormatter.format(resetsAt: now.addingTimeInterval(40), now: now),
+                       "Resets in under a minute")
+    }
+
     func testAbsoluteBeyondTwentyFourHours() {
         let now = ResetFormatter.parse("2026-06-16T00:00:00+00:00")!
         let resets = ResetFormatter.parse("2026-06-18T13:59:00+00:00")!   // > 24h ahead
