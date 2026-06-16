@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
-# Builds a launchable, ad-hoc-signed Release CCUsageMonitor.app into ./build.
+# Builds a Release CCUsageMonitor.app, signs it with a stable identity, installs it to
+# /Applications, and launches it.
 #
-# Ad-hoc signing (codesign -s -) needs no Apple Developer account, which suits a single-user,
-# this-Mac app. Gatekeeper still quarantines a copied or downloaded build; install.md covers that.
+# Why a named identity, not ad-hoc: macOS ties a Keychain "Always Allow" grant to the app's
+# code signature. An ad-hoc signature has no stable identity, so the grant is invalidated on
+# every rebuild and the app re-prompts for access to the Claude Code credential each time.
+# Signing with one self-signed certificate gives a stable identity, so the read and write
+# grants persist across launches and rebuilds. install.md covers the one-time cert setup.
+#
+# Override the identity with: SIGN_IDENTITY="My Cert Name" ./scripts/build-release.sh
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 DERIVED="build/derived"
-APP_OUT="build/CCUsageMonitor.app"
+SIGN_IDENTITY="${SIGN_IDENTITY:-CC Usage Monitor Dev}"
+APP_DEST="${APP_DEST:-/Applications/CCUsageMonitor.app}"
 
 echo "Generating the Xcode project..."
 xcodegen generate
@@ -23,11 +30,36 @@ xcodebuild -project CCUsageMonitor.xcodeproj \
 
 BUILT="$DERIVED/Build/Products/Release/CCUsageMonitor.app"
 
-echo "Copying to $APP_OUT and ad-hoc signing..."
-rm -rf "$APP_OUT"
-cp -R "$BUILT" "$APP_OUT"
-codesign --force --sign - "$APP_OUT"
-xattr -cr "$APP_OUT"   # clear any quarantine attributes so the first launch is not blocked
+# Pick the signing identity: the named self-signed cert if it exists, else ad-hoc with a warning.
+if security find-identity -v -p codesigning | grep -qF "$SIGN_IDENTITY"; then
+    SIGN_ARG="$SIGN_IDENTITY"
+    echo "Signing with identity: $SIGN_IDENTITY"
+else
+    SIGN_ARG="-"
+    echo "WARNING: code-signing identity '$SIGN_IDENTITY' not found; falling back to ad-hoc."
+    echo "         The app will re-prompt for Keychain access on every rebuild."
+    echo "         Create the cert once (Keychain Access > Certificate Assistant > Create a"
+    echo "         Certificate, type: Code Signing) and name it '$SIGN_IDENTITY'. See install.md."
+fi
 
-echo "Done: $APP_OUT"
-echo "Launch with: open '$APP_OUT'"
+# Quit any running copy so the bundle at the destination can be replaced.
+osascript -e 'quit app "CCUsageMonitor"' 2>/dev/null || true
+
+echo "Installing to $APP_DEST..."
+DEST_DIR="$(dirname "$APP_DEST")"
+if [ ! -w "$DEST_DIR" ]; then
+    echo "ERROR: $DEST_DIR is not writable. Re-run with a writable APP_DEST, e.g.:"
+    echo "       APP_DEST=\"\$HOME/Applications/CCUsageMonitor.app\" ./scripts/build-release.sh"
+    exit 1
+fi
+rm -rf "$APP_DEST"
+cp -R "$BUILT" "$APP_DEST"
+
+echo "Signing..."
+codesign --force --sign "$SIGN_ARG" "$APP_DEST"
+xattr -cr "$APP_DEST"   # clear any quarantine attributes so the first launch is not blocked
+
+echo "Launching..."
+open "$APP_DEST"
+
+echo "Done: $APP_DEST"

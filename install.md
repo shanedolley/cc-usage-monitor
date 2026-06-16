@@ -6,9 +6,27 @@ CC Usage Monitor is a menu bar app that shows your Claude Code usage and alerts 
 
 - macOS 14 or later.
 - Claude Code signed in on this Mac. The app reads its credentials from the `Claude Code-credentials` Keychain item; it never asks you for a password.
-- [XcodeGen](https://github.com/yonaskolb/XcodeGen) and Xcode command line tools, to build from source.
+- [XcodeGen](https://github.com/yonaskolb/XcodeGen) and the Xcode command line tools, to build from source.
+- A self-signed code-signing certificate (see the next section). You create it once.
 
-## Build
+## One-time: create a signing certificate
+
+macOS ties a Keychain "Always Allow" grant to the app's code signature. An ad-hoc signature has no stable identity, so the grant breaks on every rebuild and the app keeps re-prompting for access to the Claude Code credential. A self-signed certificate gives the app one stable identity, so the grant sticks.
+
+Create the certificate once:
+
+1. Open Keychain Access.
+2. Choose Keychain Access > Certificate Assistant > Create a Certificate.
+3. Name it `CC Usage Monitor Dev`, set Identity Type to Self-Signed Root, and set Certificate Type to Code Signing.
+4. Click Create, then Done.
+
+The build script signs with this certificate by default. To use a different name, set `SIGN_IDENTITY` when you build:
+
+```
+SIGN_IDENTITY="My Cert Name" ./scripts/build-release.sh
+```
+
+## Build, install, and launch
 
 Run the build script from the repository root:
 
@@ -16,33 +34,24 @@ Run the build script from the repository root:
 ./scripts/build-release.sh
 ```
 
-It generates the Xcode project, builds the Release configuration, ad-hoc signs the app, and writes `build/CCUsageMonitor.app`. Ad-hoc signing needs no Apple Developer account.
+It generates the Xcode project, builds the Release configuration, signs the app with your certificate, installs it to `/Applications/CCUsageMonitor.app`, clears the quarantine flag, and launches it. A menu bar item appears showing your highest usage percentage.
 
-## First launch
-
-Launch the app:
+To install somewhere else, set `APP_DEST`:
 
 ```
-open build/CCUsageMonitor.app
+APP_DEST="$HOME/Applications/CCUsageMonitor.app" ./scripts/build-release.sh
 ```
 
-A menu bar item appears showing your highest usage percentage. If the app lives in `build/`, the build script has already cleared the quarantine flag, so it opens directly.
-
-If you move or download the app, Gatekeeper quarantines it and blocks the first open. Clear it one of two ways:
-
-- Right-click the app in Finder and choose Open, then confirm. macOS remembers the choice.
-- Or clear the quarantine attribute from the terminal:
-
-  ```
-  xattr -cr /path/to/CCUsageMonitor.app
-  ```
+If the certificate is missing, the script warns you, signs ad-hoc, and continues. The app still runs, but it re-prompts for Keychain access on each rebuild until you create the certificate.
 
 ## Grant access
 
 On first launch the app asks for two things:
 
 - **Notifications.** Allow them so threshold alerts can fire. The Rules tab shows a banner while notifications are off, with a button that opens Settings.
-- **Keychain.** macOS prompts to let the app read the Claude Code credentials item. Choose Always Allow. If you deny it, the window shows a Keychain message with a button that opens Keychain Access, where you can grant access to the item; relaunch the app afterward.
+- **Keychain.** macOS prompts twice for the Claude Code credentials item: once to read it, and once to write the refreshed token back. Choose Always Allow both times. With the certificate in place, these grants persist across launches and rebuilds, so you grant them once. If you deny a prompt, the window shows a Keychain message with a button that opens Keychain Access, where you can grant access to the item; relaunch the app afterward.
+
+The app writes back so it can refresh the token and keep Claude Code in sync when Claude Code is closed. It updates only the token fields and preserves everything else in the item.
 
 ## Use
 
@@ -57,4 +66,4 @@ The menu bar item has no Quit command in this version. To quit, run `osascript -
 
 ## Notes on distribution
 
-This build is ad-hoc signed for local use on this Mac. Distributing it to other Macs without a warning would require a Developer ID certificate and notarization from a paid Apple Developer account, which is outside the scope of this single-user app.
+This build is signed with your own self-signed certificate for local use on this Mac. Running it on another Mac would still trip Gatekeeper. Distributing it without that warning would require a Developer ID certificate and notarization from a paid Apple Developer account, which is outside the scope of this single-user app.
