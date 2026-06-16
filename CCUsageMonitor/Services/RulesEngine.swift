@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// Evaluates usage against the user's threshold rules and fires a notification when a metric
 /// crosses from below to at-or-above a threshold.
@@ -7,9 +8,12 @@ import Foundation
 /// firing disarms it, and only a strict drop below the threshold re-arms it. A rule that is already
 /// over its threshold at launch starts disarmed (`initializeArmedState`), so the user is not alerted
 /// for a state that predates the app.
+///
+/// `rules` is `@Published` so the management UI re-renders as rules are added, removed, or change
+/// armed state.
 @MainActor
-final class RulesEngine {
-    private(set) var rules: [NotificationRule] = []
+final class RulesEngine: ObservableObject {
+    @Published private(set) var rules: [NotificationRule] = []
     private let notificationService: NotificationServiceProtocol
 
     init(notificationService: NotificationServiceProtocol) {
