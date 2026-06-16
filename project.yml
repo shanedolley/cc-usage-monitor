@@ -34,6 +34,7 @@ targets:
         CFBundleDisplayName: CC Usage Monitor
         CFBundleShortVersionString: "1.0"
         CFBundleVersion: "1"
+        NSHumanReadableCopyright: Shane Dolley
   CCUsageMonitorTests:
     type: bundle.unit-test
     platform: macOS
