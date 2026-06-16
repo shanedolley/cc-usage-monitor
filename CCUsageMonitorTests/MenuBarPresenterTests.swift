@@ -9,37 +9,58 @@ final class MenuBarPresenterTests: XCTestCase {
         return UsageSnapshot(profile: profile, usage: usage, fetchedAt: Date(timeIntervalSince1970: 0))
     }
 
-    func testLiveShowsHighestPercentAndLevel() {
+    func testLiveShowsSessionThenWeeklyDonuts() {
         let model = MenuBarPresenter.render(
             snapshot: snapshot(#"{"five_hour":{"utilization":83},"seven_day":{"utilization":40}}"#),
             status: .live)
-        XCTAssertEqual(model.title, "83%")
-        XCTAssertEqual(model.level, .warning)
-        XCTAssertTrue(model.tooltip.contains("Current session"))
+        XCTAssertEqual(model.content, .donuts(specs: [
+            DonutSpec(label: "Current session", percent: 83, level: .warning),
+            DonutSpec(label: "Weekly, all models", percent: 40, level: .normal),
+        ], dimmed: false))
+        XCTAssertEqual(model.level, .warning, "overall level is the most severe donut")
+        XCTAssertTrue(model.tooltip.contains("Current session 83%"))
+        XCTAssertTrue(model.tooltip.contains("Weekly, all models 40%"))
     }
 
-    func testReauthenticateShowsBang() {
-        let model = MenuBarPresenter.render(snapshot: nil, status: .reauthenticate)
-        XCTAssertEqual(model.title, "!")
+    func testRoundsPercentForTheNumberInside() {
+        let model = MenuBarPresenter.render(
+            snapshot: snapshot(#"{"five_hour":{"utilization":12.6}}"#), status: .live)
+        XCTAssertEqual(model.content, .donuts(specs: [
+            DonutSpec(label: "Current session", percent: 13, level: .normal),
+        ], dimmed: false))
+    }
+
+    func testWeeklyAloneStillRendersWhenSessionMissing() {
+        let model = MenuBarPresenter.render(
+            snapshot: snapshot(#"{"seven_day":{"utilization":95}}"#), status: .live)
+        XCTAssertEqual(model.content, .donuts(specs: [
+            DonutSpec(label: "Weekly, all models", percent: 95, level: .critical),
+        ], dimmed: false))
         XCTAssertEqual(model.level, .critical)
     }
 
-    func testLoadingShowsEllipsis() {
-        let model = MenuBarPresenter.render(snapshot: nil, status: .loading)
-        XCTAssertEqual(model.title, "…")
-    }
-
-    func testStaleAnnotatesTooltip() {
+    func testStaleDimsTheDonutsAndAnnotatesTooltip() {
         let model = MenuBarPresenter.render(
             snapshot: snapshot(#"{"five_hour":{"utilization":50}}"#), status: .stale)
-        XCTAssertEqual(model.title, "50%")
+        XCTAssertEqual(model.content, .donuts(specs: [
+            DonutSpec(label: "Current session", percent: 50, level: .normal),
+        ], dimmed: true))
         XCTAssertTrue(model.tooltip.contains("stale"))
     }
 
-    func testCriticalAtNinety() {
-        let model = MenuBarPresenter.render(
-            snapshot: snapshot(#"{"seven_day":{"utilization":95}}"#), status: .live)
-        XCTAssertEqual(model.title, "95%")
+    func testNoMetricsFallsBackToDash() {
+        let model = MenuBarPresenter.render(snapshot: snapshot("{}"), status: .live)
+        XCTAssertEqual(model.content, .glyph("—"))
+    }
+
+    func testReauthenticateShowsBangGlyph() {
+        let model = MenuBarPresenter.render(snapshot: nil, status: .reauthenticate)
+        XCTAssertEqual(model.content, .glyph("!"))
         XCTAssertEqual(model.level, .critical)
+    }
+
+    func testLoadingShowsEllipsisGlyph() {
+        let model = MenuBarPresenter.render(snapshot: nil, status: .loading)
+        XCTAssertEqual(model.content, .glyph("…"))
     }
 }

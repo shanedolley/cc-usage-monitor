@@ -14,6 +14,7 @@ final class MenuBarController {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.title = "…"
+            button.imagePosition = .imageOnly
             button.target = self
             button.action = #selector(handleClick)
         }
@@ -30,9 +31,19 @@ final class MenuBarController {
     private func apply(snapshot: UsageSnapshot?, status: LoadStatus) {
         guard let button = statusItem.button else { return }
         let model = MenuBarPresenter.render(snapshot: snapshot, status: status)
-        button.title = model.title
         button.toolTip = model.tooltip
-        button.contentTintColor = model.level.statusColor
+        switch model.content {
+        case .glyph(let symbol):
+            button.image = nil
+            button.imagePosition = .noImage
+            button.title = symbol
+            button.contentTintColor = model.level.statusColor
+        case .donuts(let specs, let dimmed):
+            button.title = ""
+            button.imagePosition = .imageOnly
+            button.contentTintColor = nil   // the non-template image carries its own colors
+            button.image = MenuBarIconRenderer.image(specs: specs, dimmed: dimmed)
+        }
     }
 
     @objc private func handleClick() { onOpen() }

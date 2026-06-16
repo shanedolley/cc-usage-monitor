@@ -42,19 +42,3 @@ enum PlanTierFormatter {
         return !digits.isEmpty && digits.allSatisfy(\.isNumber)
     }
 }
-
-/// Summaries across the three limit metrics.
-enum UsageMetricSummary {
-    /// The most-used metric across current session and the two weekly limits, for the
-    /// glanceable menu bar readout.
-    static func highestMetric(_ usage: UsageResponse) -> (name: String, utilization: Double)? {
-        let candidates: [(String, Double?)] = [
-            ("Current session", usage.fiveHour?.utilization),
-            ("Weekly, all models", usage.sevenDay?.utilization),
-            ("Weekly, Sonnet", usage.sevenDaySonnet?.utilization),
-        ]
-        return candidates
-            .compactMap { name, value in value.map { (name, $0) } }
-            .max { $0.1 < $1.1 }
-    }
-}
