@@ -5,9 +5,12 @@ import AppKit
 /// the list of rules or an empty-state prompt. Adding opens a sheet; deleting removes the rule.
 struct RulesView: View {
     @ObservedObject var rulesEngine: RulesEngine
-    /// Drives the disabled-notifications banner. The composition root (task 13) supplies the live
+    /// Drives the disabled-notifications banner. The composition root supplies the live
     /// authorization state; it defaults to authorized so previews and tests read normally.
     var notificationsAuthorized: Bool = true
+    /// Supplies the latest usage when a rule is added, so a rule added while a metric is already
+    /// over its threshold starts disarmed. Defaults to no usage (the rule starts armed).
+    var currentUsage: () -> UsageResponse? = { nil }
 
     @State private var showingAddRule = false
 
@@ -39,7 +42,7 @@ struct RulesView: View {
         .padding(20)
         .frame(width: 360)
         .sheet(isPresented: $showingAddRule) {
-            AddRuleView(rulesEngine: rulesEngine)
+            AddRuleView(rulesEngine: rulesEngine, currentUsage: currentUsage)
         }
     }
 }
@@ -82,6 +85,7 @@ struct RuleRowView: View {
 /// The add-rule sheet: pick a metric, type a 1 to 99 threshold, with inline validation.
 struct AddRuleView: View {
     @ObservedObject var rulesEngine: RulesEngine
+    var currentUsage: () -> UsageResponse? = { nil }
     @Environment(\.dismiss) private var dismiss
 
     @State private var metric: RuleMetric = .fiveHour
@@ -124,7 +128,7 @@ struct AddRuleView: View {
 
     private func add() {
         guard let threshold = validation.value else { return }
-        rulesEngine.addRule(metric: metric, threshold: threshold)
+        rulesEngine.addRule(metric: metric, threshold: threshold, currentUsage: currentUsage())
         dismiss()
     }
 }
