@@ -18,7 +18,7 @@ enum LoadStatus: Equatable {
     case offline             // no network and no data yet
     case reauthenticate      // token missing or refresh failed; user must sign in to Claude Code
     case keychainDenied      // macOS denied Keychain access
-    case endpointUnavailable // terminal API failure (403, 404, 410)
+    case endpointUnavailable // persistent API failure (403, 404, 410); the app keeps polling
 }
 
 /// Drives the 60-second poll loop, owns the published UI state, pauses when the network is
@@ -30,6 +30,13 @@ final class PollingCoordinator: ObservableObject {
     @Published private(set) var lastUpdated: Date?
 
     let interval: TimeInterval
+    /// How long to wait before the next poll. Normally `interval`; a 429 raises it to the
+    /// `Retry-After` value, capped at `maxBackoff`. A successful poll resets it.
+    private(set) var nextDelay: TimeInterval
+
+    /// The most a 429 `Retry-After` can push the next poll out: five minutes.
+    static let maxBackoff: TimeInterval = 300
+
     private let api: APIClientProtocol
     private let tokenProvider: AccessTokenProviding
     private let clock: ClockProtocol
@@ -47,6 +54,7 @@ final class PollingCoordinator: ObservableObject {
         self.tokenProvider = tokenProvider
         self.clock = clock
         self.interval = interval
+        self.nextDelay = interval
     }
 
     /// Starts polling, network monitoring, and wake recovery.
@@ -68,34 +76,68 @@ final class PollingCoordinator: ObservableObject {
 
     /// One fetch cycle. Directly testable: callers can invoke it and assert the published state.
     func poll() async {
+        nextDelay = interval   // default for this cycle; only a 429 below raises it
         guard isOnline else {
             status = (snapshot == nil) ? .offline : .stale
             return
         }
         do {
-            let token = try await tokenProvider.validAccessToken()
-            async let profileCall = api.fetchProfile(accessToken: token)
-            async let usageCall = api.fetchUsage(accessToken: token)
-            let snap = UsageSnapshot(profile: try await profileCall,
-                                     usage: try await usageCall,
-                                     fetchedAt: clock.now())
-            snapshot = snap
-            lastUpdated = snap.fetchedAt
-            status = .live
+            apply(try await fetchSnapshot(forceRefresh: false))
         } catch APIError.unauthorized {
-            status = .reauthenticate
+            await retryAfterForcedRefresh()
         } catch KeychainError.itemNotFound {
             status = .reauthenticate
         } catch KeychainError.accessDenied {
             status = .keychainDenied
         } catch APIError.endpointUnavailable(_) {
             status = .endpointUnavailable
+        } catch APIError.rateLimited(let retryAfter) {
+            nextDelay = min(retryAfter ?? interval, Self.maxBackoff)
+            status = (snapshot == nil) ? .loading : .stale
         } catch APIError.network(_) {
             status = (snapshot == nil) ? .offline : .stale
         } catch {
-            // Rate limit, 5xx, decoding, and anything else: keep the last good data if we have it.
+            // 5xx, decoding, and anything else: keep the last good data if we have it.
             status = (snapshot == nil) ? .loading : .stale
         }
+    }
+
+    /// A 401 can mean the token was rejected mid-flight even though it had not expired. Force one
+    /// refresh and retry; a second failure means the credentials are genuinely stale.
+    private func retryAfterForcedRefresh() async {
+        do {
+            apply(try await fetchSnapshot(forceRefresh: true))
+        } catch KeychainError.accessDenied {
+            status = .keychainDenied
+        } catch APIError.endpointUnavailable(_) {
+            status = .endpointUnavailable
+        } catch APIError.rateLimited(let retryAfter) {
+            // A 429 on the retry is rate-limiting, not an auth failure: back off, do not sign out.
+            nextDelay = min(retryAfter ?? interval, Self.maxBackoff)
+            status = (snapshot == nil) ? .loading : .stale
+        } catch APIError.network(_) {
+            status = (snapshot == nil) ? .offline : .stale
+        } catch {
+            // Still unauthorized, refresh failed, or token missing: the user must sign in again.
+            status = .reauthenticate
+        }
+    }
+
+    private func fetchSnapshot(forceRefresh: Bool) async throws -> UsageSnapshot {
+        let token = forceRefresh
+            ? try await tokenProvider.refreshedAccessToken()
+            : try await tokenProvider.validAccessToken()
+        async let profileCall = api.fetchProfile(accessToken: token)
+        async let usageCall = api.fetchUsage(accessToken: token)
+        return UsageSnapshot(profile: try await profileCall,
+                             usage: try await usageCall,
+                             fetchedAt: clock.now())
+    }
+
+    private func apply(_ snap: UsageSnapshot) {
+        snapshot = snap
+        lastUpdated = snap.fetchedAt
+        status = .live
     }
 
     private func startPolling() {
@@ -103,8 +145,8 @@ final class PollingCoordinator: ObservableObject {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.poll()
-                let interval = self?.interval ?? 60
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                let delay = self?.nextDelay ?? 60
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
         }
     }

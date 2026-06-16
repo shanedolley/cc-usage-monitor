@@ -29,19 +29,29 @@ actor TokenManager {
         try await validCredential().accessToken
     }
 
+    /// Forces a refresh regardless of the expiry buffer and returns the new access token. Recovers
+    /// from a 401 on a token that looked valid by the clock but was rejected by the server.
+    func refreshedAccessToken() async throws -> String {
+        let current = try keychain.readCredential()
+        return try await refresh(previous: current, force: true).accessToken
+    }
+
     func validCredential() async throws -> KeychainCredential {
         let current = try keychain.readCredential()
         if !current.isExpired(now: clock.now()) { return current }
         return try await refresh(previous: current)
     }
 
-    private func refresh(previous: KeychainCredential) async throws -> KeychainCredential {
-        if let inFlight {
+    private func refresh(previous: KeychainCredential, force: Bool = false) async throws -> KeychainCredential {
+        // A forced refresh must do real network work, so it does not join a non-forced refresh
+        // already in flight, which could return the not-expired token the server just rejected.
+        if !force, let inFlight {
             return try await inFlight.value
         }
         let task = Task { [keychain, refresher, writer, clock] () async throws -> KeychainCredential in
-            // Re-read: Claude Code may have refreshed the token while we waited.
-            if let latest = try? keychain.readCredential(), !latest.isExpired(now: clock.now()) {
+            // Re-read: Claude Code may have refreshed the token while we waited. A forced refresh
+            // skips this shortcut, since its token was rejected even though it has not expired.
+            if !force, let latest = try? keychain.readCredential(), !latest.isExpired(now: clock.now()) {
                 return latest
             }
             let base = (try? keychain.readCredential()) ?? previous
@@ -54,13 +64,7 @@ actor TokenManager {
             return refreshed
         }
         inFlight = task
-        do {
-            let result = try await task.value
-            inFlight = nil
-            return result
-        } catch {
-            inFlight = nil
-            throw error
-        }
+        defer { inFlight = nil }
+        return try await task.value
     }
 }

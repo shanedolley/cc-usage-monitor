@@ -104,6 +104,22 @@ final class TokenManagerTests: XCTestCase {
         XCTAssertEqual(writer.updates.first?.accessToken, "refreshed")
     }
 
+    func testRefreshedAccessTokenForcesRefreshEvenWhenNotExpired() async throws {
+        // The token looks valid by the clock but was rejected by the server (a 401), so a forced
+        // refresh must hit the network rather than returning the not-expired token.
+        let keychain = FakeKeychain(credential(expiresAtMs: 99_000_000, accessToken: "valid-but-rejected"))
+        let refresher = FakeRefresher(result: credential(expiresAtMs: 99_000_000, accessToken: "forced"))
+        let writer = FakeWriter()
+        let manager = TokenManager(keychain: keychain, refresher: refresher, writer: writer,
+                                   clock: FixedClock(date: now))
+
+        let token = try await manager.refreshedAccessToken()
+
+        XCTAssertEqual(token, "forced", "a forced refresh ignores the not-expired shortcut")
+        XCTAssertEqual(refresher.calls, 1)
+        XCTAssertEqual(writer.updates.first?.accessToken, "forced")
+    }
+
     func testReReadFirstSkipsNetworkWhenClaudeCodeAlreadyRefreshed() async throws {
         // First read (stale) triggers refresh; the re-read inside refresh sees a fresh token.
         let keychain = FakeKeychain(

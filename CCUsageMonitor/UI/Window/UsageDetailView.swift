@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// The detail window: plan tier header, the three usage rows, the credits section, and a
 /// last-updated footer, with dedicated screens for the loading, reauthenticate, keychain,
@@ -37,11 +38,10 @@ struct UsageDetailView: View {
             MessageView(title: "Sign in to Claude Code",
                         message: "Open Claude Code in your terminal and sign in again, then relaunch this app.")
         case .keychainDenied:
-            MessageView(title: "Keychain access needed",
-                        message: "Allow access to the Claude Code credentials item in System Settings, then relaunch.")
+            KeychainPermissionView()
         case .endpointUnavailable:
             MessageView(title: "Usage endpoint unavailable",
-                        message: "Anthropic's usage endpoint did not respond. The app keeps retrying.")
+                        message: "Anthropic's usage endpoint is unavailable or has moved. The app keeps retrying.")
         default:
             if let snapshot = coordinator.snapshot {
                 metrics(snapshot)
@@ -148,7 +148,26 @@ struct CreditsView: View {
     }
 }
 
-/// A titled message used for the reauthenticate, keychain, and endpoint states.
+/// The keychain-denied state: explains the denial and opens Keychain Access, where the user can
+/// grant this app access to the Claude Code credentials item.
+struct KeychainPermissionView: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Keychain access needed").font(.subheadline).bold()
+            Text("Allow this app to read the Claude Code credentials item, then relaunch.")
+                .font(.caption).foregroundStyle(.secondary)
+            Button("Open Keychain Access") { Self.openKeychainAccess() }
+                .font(.caption)
+        }
+        .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
+    }
+
+    private static func openKeychainAccess() {
+        NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Keychain Access.app"))
+    }
+}
+
+/// A titled message used for the reauthenticate and endpoint states.
 struct MessageView: View {
     let title: String
     let message: String
