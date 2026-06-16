@@ -20,6 +20,8 @@ Create the certificate once:
 3. Name it `CC Usage Monitor Dev`, set Identity Type to Self-Signed Root, and set Certificate Type to Code Signing.
 4. Click Create, then Done.
 
+Keychain Access marks the certificate "not verified by a third party". That is expected for a self-signed certificate and changes nothing here: signing works, and the Keychain grant persists on the signature's identity. You do not need to trust the certificate.
+
 The build script signs with this certificate by default. To use a different name, set `SIGN_IDENTITY` when you build:
 
 ```
@@ -34,7 +36,9 @@ Run the build script from the repository root:
 ./scripts/build-release.sh
 ```
 
-It generates the Xcode project, builds the Release configuration, signs the app with your certificate, installs it to `/Applications/CCUsageMonitor.app`, clears the quarantine flag, and launches it. A menu bar item appears showing your highest usage percentage.
+It generates the Xcode project, builds the Release configuration, signs the app with your certificate, installs it to `/Applications/CCUsageMonitor.app`, clears the quarantine flag, and launches it. A menu bar item appears showing two donut rings: the current session on the left and the weekly all-models limit on the right, each with its percentage inside.
+
+On the first build, macOS asks whether `codesign` may use the signing key. Choose Always Allow so later builds sign without prompting.
 
 To install somewhere else, set `APP_DEST`:
 
@@ -55,7 +59,7 @@ The app writes back so it can refresh the token and keep Claude Code in sync whe
 
 ## Use
 
-- The menu bar item shows the highest of your three usage metrics. It turns amber at 80 percent and red at 90 percent.
+- The menu bar item shows two donut rings: the current session on the left and the weekly all-models limit on the right, each with its percentage inside. A ring turns amber at 80 percent and red at 90 percent, and both dim when the data is stale.
 - Click the menu bar item to open the window. The **Usage** tab shows the current session, the two weekly limits, your plan tier, and usage credits. The **Rules** tab adds, lists, and deletes threshold alerts.
 - Add a rule by picking a metric and a threshold from 1 to 99. The app notifies you once when the metric reaches the threshold, and re-arms only after the metric drops back below it.
 - Rules persist in `~/Library/Application Support/CCUsageMonitor/notification-rules.json`.

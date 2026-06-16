@@ -31,7 +31,10 @@ xcodebuild -project CCUsageMonitor.xcodeproj \
 BUILT="$DERIVED/Build/Products/Release/CCUsageMonitor.app"
 
 # Pick the signing identity: the named self-signed cert if it exists, else ad-hoc with a warning.
-if security find-identity -v -p codesigning | grep -qF "$SIGN_IDENTITY"; then
+# Match any code-signing identity by that name, trusted or not. A self-signed cert reports as
+# untrusted, which is fine: codesign signs with it, and the Keychain grant persists on the
+# signature's identity, not on system trust. -v would hide it, so it is omitted on purpose.
+if security find-identity -p codesigning | grep -qF "$SIGN_IDENTITY"; then
     SIGN_ARG="$SIGN_IDENTITY"
     echo "Signing with identity: $SIGN_IDENTITY"
 else
