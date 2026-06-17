@@ -12,7 +12,7 @@ xcuserdata/
 
 # xcodegen-generated (project.yml is the source of truth; run `xcodegen generate`)
 *.xcodeproj/
-CCUsageMonitor/Resources/Info.plist
+macos/CCUsageMonitor/Resources/Info.plist
 
 # Swift Package Manager
 .swiftpm/
@@ -47,4 +47,12 @@ node_modules/
 
 # Task files
 # tasks.json
-# tasks/ 
+# tasks/
+
+# .NET / Windows build output (windows/ app)
+[Bb]in/
+[Oo]bj/
+*.user
+
+# Brainstorm and planning docs stay local, not in the public repo
+docs/brainstorm/
