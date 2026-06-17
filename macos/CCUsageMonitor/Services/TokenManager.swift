@@ -29,6 +29,18 @@ actor TokenManager {
         try await validCredential().accessToken
     }
 
+    /// Establishes the Keychain grants in one user-visible step: an interactive read grants read
+    /// access, and re-writing the same tokens grants write access. After this, the automatic poll
+    /// and write-back run non-interactively and never prompt. A write failure here is non-fatal,
+    /// because read access alone lets the app show usage.
+    func establishAccess() async throws {
+        let credential = try keychain.readCredential(allowInteraction: true)
+        try? writer?.updateTokens(accessToken: credential.accessToken,
+                                  refreshToken: credential.refreshToken,
+                                  expiresAt: credential.expiresAt,
+                                  allowInteraction: true)
+    }
+
     /// Forces a refresh regardless of the expiry buffer and returns the new access token. Recovers
     /// from a 401 on a token that looked valid by the clock but was rejected by the server.
     func refreshedAccessToken() async throws -> String {

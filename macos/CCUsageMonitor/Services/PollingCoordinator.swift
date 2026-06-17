@@ -101,6 +101,10 @@ final class PollingCoordinator: ObservableObject {
             status = .reauthenticate
         } catch KeychainError.accessDenied {
             status = .keychainDenied
+        } catch KeychainError.interactionRequired {
+            // A background read found no grant; show the keychain state without firing a modal.
+            // The user re-grants via Grant Access, which prompts once.
+            status = .keychainDenied
         } catch APIError.endpointUnavailable(_) {
             status = .endpointUnavailable
         } catch APIError.rateLimited(let retryAfter) {
@@ -114,12 +118,25 @@ final class PollingCoordinator: ObservableObject {
         }
     }
 
+    /// Performs the one-time interactive Keychain grant, then refreshes the data. This is the only
+    /// path that may present a Keychain prompt; the app calls it at launch and from the Grant Access
+    /// button. A denied or failed grant is swallowed, since the following poll reflects the real
+    /// state (it shows `.keychainDenied` again rather than a half-set status).
+    func establishAccess() async {
+        try? await tokenProvider.establishAccess()
+        await poll()
+    }
+
     /// A 401 can mean the token was rejected mid-flight even though it had not expired. Force one
     /// refresh and retry; a second failure means the credentials are genuinely stale.
     private func retryAfterForcedRefresh() async {
         do {
             apply(try await fetchSnapshot(forceRefresh: true))
         } catch KeychainError.accessDenied {
+            status = .keychainDenied
+        } catch KeychainError.interactionRequired {
+            // A background read found no grant; show the keychain state without firing a modal.
+            // The user re-grants via Grant Access, which prompts once.
             status = .keychainDenied
         } catch APIError.endpointUnavailable(_) {
             status = .endpointUnavailable

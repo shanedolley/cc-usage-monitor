@@ -12,17 +12,24 @@ struct KeychainWriter: KeychainWriting {
         self.account = account
     }
 
-    func updateTokens(accessToken: String, refreshToken: String, expiresAt: TimeInterval) throws {
-        let raw = try KeychainItem.readData(service: service, account: account)
-        let patched = try KeychainCredentialPatcher.patch(
-            raw, accessToken: accessToken, refreshToken: refreshToken, expiresAt: expiresAt)
+    func updateTokens(accessToken: String, refreshToken: String, expiresAt: TimeInterval,
+                      allowInteraction: Bool) throws {
+        // Set the interaction flag once for the whole read-patch-update so the internal read does
+        // not re-enable prompting before the write. A background write-back passes false, so a
+        // missing grant fails fast instead of popping a dialog (the token manager treats the
+        // failure as non-fatal); only an explicit grant passes true.
+        try KeychainItem.withUserInteraction(allowInteraction) {
+            let raw = try KeychainItem.copyData(service: service, account: account)
+            let patched = try KeychainCredentialPatcher.patch(
+                raw, accessToken: accessToken, refreshToken: refreshToken, expiresAt: expiresAt)
 
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: patched] as CFDictionary)
-        guard status == errSecSuccess else { throw KeychainError.unexpectedStatus(status) }
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account,
+            ]
+            let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: patched] as CFDictionary)
+            guard status == errSecSuccess else { throw KeychainItem.mapWriteStatus(status) }
+        }
     }
 }

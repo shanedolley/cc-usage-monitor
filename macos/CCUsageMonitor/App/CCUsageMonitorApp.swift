@@ -53,7 +53,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Prompt for permission at launch; the banner reads the live state when the window opens.
         Task { _ = await notificationService.requestAuthorization() }
-        coordinator.start()
+        // Establish the Keychain grant once (the only interactive Keychain prompt), then start the
+        // poll loop, which reads non-interactively and never prompts again.
+        Task {
+            await coordinator.establishAccess()
+            coordinator.start()
+        }
     }
 
     /// A menu bar accessory keeps running after its window closes.

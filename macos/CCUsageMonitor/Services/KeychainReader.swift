@@ -13,7 +13,8 @@ struct KeychainReader: KeychainReading {
         self.account = account
     }
 
-    func readCredential() throws -> KeychainCredential {
-        try KeychainCredentialParser.parse(KeychainItem.readData(service: service, account: account))
+    func readCredential(allowInteraction: Bool) throws -> KeychainCredential {
+        try KeychainCredentialParser.parse(
+            KeychainItem.readData(service: service, account: account, allowInteraction: allowInteraction))
     }
 }

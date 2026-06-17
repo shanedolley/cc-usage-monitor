@@ -39,7 +39,7 @@ struct UsageDetailView: View {
             MessageView(title: "Sign in to Claude Code",
                         message: "Open Claude Code in your terminal and sign in again, then relaunch this app.")
         case .keychainDenied:
-            KeychainPermissionView()
+            KeychainPermissionView { await coordinator.establishAccess() }
         case .endpointUnavailable:
             MessageView(title: "Usage endpoint unavailable",
                         message: "Anthropic's usage endpoint is unavailable or has moved. The app keeps retrying.")
@@ -149,16 +149,23 @@ struct CreditsView: View {
     }
 }
 
-/// The keychain-denied state: explains the denial and opens Keychain Access, where the user can
-/// grant this app access to the Claude Code credentials item.
+/// The keychain-denied state: explains the denial and offers a Grant Access button that triggers
+/// the one interactive Keychain prompt in place, so the user grants access without relaunching.
+/// Opening Keychain Access stays as a fallback.
 struct KeychainPermissionView: View {
+    /// Runs the one-time interactive grant (the coordinator's `establishAccess`).
+    let onGrant: () async -> Void
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Keychain access needed").font(.subheadline).bold()
-            Text("Allow this app to read the Claude Code credentials item, then relaunch.")
+            Text("Allow this app to read the Claude Code credentials item. Choose Always Allow so it grants once.")
                 .font(.caption).foregroundStyle(.secondary)
-            Button("Open Keychain Access") { Self.openKeychainAccess() }
-                .font(.caption)
+            HStack(spacing: 12) {
+                Button("Grant Access") { Task { await onGrant() } }
+                Button("Open Keychain Access") { Self.openKeychainAccess() }
+                    .font(.caption)
+            }
         }
         .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
     }

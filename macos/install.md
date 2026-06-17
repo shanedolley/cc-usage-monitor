@@ -53,7 +53,7 @@ If the certificate is missing, the script warns you, signs ad-hoc, and continues
 On first launch the app asks for two things:
 
 - **Notifications.** Allow them so threshold alerts can fire. The Rules tab shows a banner while notifications are off, with a button that opens Settings.
-- **Keychain.** macOS prompts twice for the Claude Code credentials item: once to read it, and once to write the refreshed token back. Choose Always Allow both times. With the certificate in place, these grants persist across launches and rebuilds, so you grant them once. If you deny a prompt, the window shows a Keychain message with a button that opens Keychain Access, where you can grant access to the item; relaunch the app afterward.
+- **Keychain.** On first launch the app asks once to read the Claude Code credentials item and once to write the refreshed token back. Choose Always Allow both times. With the certificate in place, these grants persist across launches and rebuilds, so you grant them once. The app never prompts from its background poll, so it cannot trigger a stream of dialogs: if the grant is ever lost, the window shows a Keychain message with a **Grant Access** button that re-prompts in place, and you do not relaunch.
 
 The app writes back so it can refresh the token and keep Claude Code in sync when Claude Code is closed. It updates only the token fields and preserves everything else in the item.
 

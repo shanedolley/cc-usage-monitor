@@ -9,12 +9,14 @@ private final class FakeKeychain: KeychainReading, @unchecked Sendable {
     private var sequence: [KeychainCredential]
     var error: KeychainError?
     private(set) var readCount = 0
+    private(set) var lastAllowInteraction: Bool?
 
     init(_ creds: KeychainCredential...) { sequence = creds }
 
-    func readCredential() throws -> KeychainCredential {
+    func readCredential(allowInteraction: Bool) throws -> KeychainCredential {
         lock.lock(); defer { lock.unlock() }
         readCount += 1
+        lastAllowInteraction = allowInteraction
         if let error { throw error }
         let credential = sequence[min(idx, sequence.count - 1)]
         idx += 1
@@ -50,10 +52,13 @@ private final class FakeRefresher: TokenRefreshing, @unchecked Sendable {
 private final class FakeWriter: KeychainWriting, @unchecked Sendable {
     private let lock = NSLock()
     private(set) var updates: [(accessToken: String, refreshToken: String, expiresAt: TimeInterval)] = []
+    private(set) var lastAllowInteraction: Bool?
     var error: Error?
 
-    func updateTokens(accessToken: String, refreshToken: String, expiresAt: TimeInterval) throws {
+    func updateTokens(accessToken: String, refreshToken: String, expiresAt: TimeInterval,
+                      allowInteraction: Bool) throws {
         lock.lock(); defer { lock.unlock() }
+        lastAllowInteraction = allowInteraction
         if let error { throw error }
         updates.append((accessToken, refreshToken, expiresAt))
     }
@@ -180,5 +185,31 @@ final class TokenManagerTests: XCTestCase {
         let token = try await manager.validAccessToken()
 
         XCTAssertEqual(token, "refreshed", "refresh succeeds even when write-back fails")
+    }
+
+    func testValidAccessTokenReadsNonInteractively() async throws {
+        let keychain = FakeKeychain(credential(expiresAtMs: 99_000_000, accessToken: "fresh"))
+        let manager = TokenManager(keychain: keychain,
+                                   refresher: FakeRefresher(result: credential(expiresAtMs: 0)),
+                                   writer: FakeWriter(), clock: FixedClock(date: now))
+
+        _ = try await manager.validAccessToken()
+
+        XCTAssertEqual(keychain.lastAllowInteraction, false, "the poll path must never prompt")
+    }
+
+    func testEstablishAccessReadsAndWritesInteractively() async throws {
+        let keychain = FakeKeychain(credential(expiresAtMs: 99_000_000, accessToken: "at"))
+        let writer = FakeWriter()
+        let manager = TokenManager(keychain: keychain,
+                                   refresher: FakeRefresher(result: credential(expiresAtMs: 0)),
+                                   writer: writer, clock: FixedClock(date: now))
+
+        try await manager.establishAccess()
+
+        XCTAssertEqual(keychain.lastAllowInteraction, true, "the explicit grant reads interactively")
+        XCTAssertEqual(writer.lastAllowInteraction, true, "the explicit grant writes interactively")
+        XCTAssertEqual(writer.updates.count, 1, "it re-writes the same tokens to grant write access")
+        XCTAssertEqual(writer.updates.first?.accessToken, "at")
     }
 }

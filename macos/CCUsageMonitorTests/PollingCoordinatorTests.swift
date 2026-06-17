@@ -21,6 +21,13 @@ private struct FakeToken: AccessTokenProviding {
     func refreshedAccessToken() async throws -> String { try (refreshResult ?? result).get() }
 }
 
+/// Records `establishAccess()` so the grant-then-poll flow is testable.
+private final class RecordingToken: AccessTokenProviding, @unchecked Sendable {
+    private(set) var establishCalls = 0
+    func validAccessToken() async throws -> String { "token" }
+    func establishAccess() async throws { establishCalls += 1 }
+}
+
 /// Returns a different usage result on each fetch, so a 401-then-success retry can be tested.
 /// An actor so its mutable sequence is async-safe without manual locking.
 private actor SequencedAPI: APIClientProtocol {
@@ -296,5 +303,27 @@ final class PollingCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(coordinator.nextDelay, 60, "a good poll restores the normal interval")
         XCTAssertEqual(coordinator.status, .live)
+    }
+
+    func testInteractionRequiredShowsKeychainDeniedWithoutPrompting() async {
+        let api = FakeAPI(profile: .success(emptyProfile()), usage: .success(usage(1)))
+        let coordinator = makeCoordinator(api: api,
+            token: FakeToken(result: .failure(KeychainError.interactionRequired)))
+
+        await coordinator.poll()
+
+        XCTAssertEqual(coordinator.status, .keychainDenied,
+                       "a background read that needs a prompt shows the keychain state, no modal")
+    }
+
+    func testEstablishAccessGrantsThenPolls() async {
+        let api = FakeAPI(profile: .success(emptyProfile()), usage: .success(usage(5)))
+        let token = RecordingToken()
+        let coordinator = makeCoordinator(api: api, token: token)
+
+        await coordinator.establishAccess()
+
+        XCTAssertEqual(token.establishCalls, 1)
+        XCTAssertEqual(coordinator.status, .live, "after granting, the follow-up poll shows live data")
     }
 }
