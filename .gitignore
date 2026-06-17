@@ -56,3 +56,4 @@ node_modules/
 
 # Brainstorm and planning docs stay local, not in the public repo
 docs/brainstorm/
+.taskmaster/
