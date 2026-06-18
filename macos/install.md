@@ -57,6 +57,26 @@ On first launch the app asks for two things:
 
 The app writes back so it can refresh the token and keep Claude Code in sync when Claude Code is closed. It updates only the token fields and preserves everything else in the item.
 
+## Credential source: file or Keychain
+
+The app reads the subscription OAuth credential two ways and prefers the first it finds:
+
+1. **File:** `~/.config/cc-usage-monitor/credentials.json`. A file read never prompts, so the app stays silent and the Keychain dialogs never appear. Prefer this when Claude Code authenticates with a `CLAUDE_CODE_OAUTH_TOKEN` env var, because it then stops maintaining the Keychain item, or when the Keychain item's access list breaks after a macOS update.
+2. **Keychain:** Claude Code's `Claude Code-credentials` item, the path the Grant access section covers. The app uses this when the file is absent.
+
+Seed the file once from the Keychain credential:
+
+```sh
+mkdir -p ~/.config/cc-usage-monitor
+security find-generic-password -s "Claude Code-credentials" -a "$(id -un)" -w \
+  > ~/.config/cc-usage-monitor/credentials.json
+chmod 600 ~/.config/cc-usage-monitor/credentials.json
+```
+
+Approve the one Keychain dialog. The app then refreshes the token itself and writes each refresh back to the file, so it never reads the Keychain again.
+
+The credential must carry the `user:profile` scope, which `claude /login` grants. A `claude setup-token` token will not work: it is inference-only, so the usage and profile endpoints reject it with a 403 scope error. If the file's refresh token expires, the window shows a sign-in message; run `claude /login`, then re-run the seed command above.
+
 ## Use
 
 - The menu bar item shows two donut rings: the current session on the left and the weekly all-models limit on the right, each with its percentage inside. A ring turns amber at 80 percent and red at 90 percent, and both dim when the data is stale.
