@@ -30,9 +30,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var clickObserver: NSObjectProtocol?
 
     override init() {
-        let tokenManager = TokenManager(keychain: KeychainReader(),
+        // Prefer the file credential store once it is seeded: TokenManager refreshes it through the
+        // same read, refresh, and write-back loop it runs against the Keychain, but file reads never
+        // prompt, so the menu bar app stays non-interactive. Fall back to Claude Code's Keychain
+        // credential when the file is absent.
+        let tokenManager: TokenManager
+        if FileCredentialStore.isConfigured() {
+            let store = FileCredentialStore()
+            tokenManager = TokenManager(keychain: store, refresher: TokenRefresher(), writer: store)
+        } else {
+            tokenManager = TokenManager(keychain: KeychainReader(),
                                         refresher: TokenRefresher(),
                                         writer: KeychainWriter())
+        }
         coordinator = PollingCoordinator(api: APIClient(), tokenProvider: tokenManager)
         notificationService = NotificationService()
         rulesEngine = RulesEngine(notificationService: notificationService)

@@ -36,8 +36,8 @@ struct UsageDetailView: View {
         case .loading where coordinator.snapshot == nil:
             ProgressView("Loading usage…").frame(maxWidth: .infinity, minHeight: 120)
         case .reauthenticate:
-            MessageView(title: "Sign in to Claude Code",
-                        message: "Open Claude Code in your terminal and sign in again, then relaunch this app.")
+            MessageView(title: "Claude Code sign-in needed",
+                        message: "Re-seed ~/.config/cc-usage-monitor/credentials.json from a fresh claude /login (see install.md), then relaunch this app.")
         case .keychainDenied:
             KeychainPermissionView { await coordinator.establishAccess() }
         case .endpointUnavailable:
