@@ -174,6 +174,35 @@ final class TokenManagerTests: XCTestCase {
         }
     }
 
+    func testReadOnlyReturnsValidTokenWithoutRefreshing() async throws {
+        // A NoRefreshTokenRefresher and a nil writer make the manager read-only: a valid token is
+        // returned straight from the Keychain, with no refresh and no write-back.
+        let keychain = FakeKeychain(credential(expiresAtMs: 99_000_000, accessToken: "fresh"))
+        let manager = TokenManager(keychain: keychain, refresher: NoRefreshTokenRefresher(),
+                                   writer: nil, clock: FixedClock(date: now))
+
+        let token = try await manager.validAccessToken()
+
+        XCTAssertEqual(token, "fresh")
+    }
+
+    func testReadOnlyReportsStaleWhenExpiredAndClaudeCodeHasNotRefreshed() async {
+        // The stored token has expired and the monitor does not refresh it, so it reports staleness
+        // rather than rotating the shared session.
+        let keychain = FakeKeychain(credential(expiresAtMs: 0, accessToken: "stale"))
+        let manager = TokenManager(keychain: keychain, refresher: NoRefreshTokenRefresher(),
+                                   writer: nil, clock: FixedClock(date: now))
+
+        do {
+            _ = try await manager.validAccessToken()
+            XCTFail("expected tokenStale")
+        } catch let error as APIError {
+            XCTAssertEqual(error, .tokenStale)
+        } catch {
+            XCTFail("expected APIError.tokenStale, got \(error)")
+        }
+    }
+
     func testWriteBackFailureIsNonFatal() async throws {
         let keychain = FakeKeychain(credential(expiresAtMs: 0))
         let refresher = FakeRefresher(result: credential(expiresAtMs: 99_000_000, accessToken: "refreshed"))

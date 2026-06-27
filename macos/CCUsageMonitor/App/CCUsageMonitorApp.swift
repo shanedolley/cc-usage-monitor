@@ -30,19 +30,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var clickObserver: NSObjectProtocol?
 
     override init() {
-        // Prefer the file credential store once it is seeded: TokenManager refreshes it through the
-        // same read, refresh, and write-back loop it runs against the Keychain, but file reads never
-        // prompt, so the menu bar app stays non-interactive. Fall back to Claude Code's Keychain
-        // credential when the file is absent.
-        let tokenManager: TokenManager
-        if FileCredentialStore.isConfigured() {
-            let store = FileCredentialStore()
-            tokenManager = TokenManager(keychain: store, refresher: TokenRefresher(), writer: store)
-        } else {
-            tokenManager = TokenManager(keychain: KeychainReader(),
-                                        refresher: TokenRefresher(),
-                                        writer: KeychainWriter())
-        }
+        // The monitor reads the access token Claude Code keeps in the Keychain but never refreshes
+        // it. Anthropic rotates refresh tokens, so a second refresher would rotate the shared OAuth
+        // session out from under Claude Code and sign it out. A `NoRefreshTokenRefresher` and a nil
+        // writer make TokenManager read-only: it uses a valid token and reports an expired one as
+        // stale until Claude Code refreshes it.
+        let tokenManager = TokenManager(keychain: KeychainReader(),
+                                        refresher: NoRefreshTokenRefresher(),
+                                        writer: nil)
         coordinator = PollingCoordinator(api: APIClient(), tokenProvider: tokenManager)
         notificationService = NotificationService()
         rulesEngine = RulesEngine(notificationService: notificationService)

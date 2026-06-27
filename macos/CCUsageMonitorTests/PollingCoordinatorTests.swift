@@ -21,6 +21,15 @@ private struct FakeToken: AccessTokenProviding {
     func refreshedAccessToken() async throws -> String { try (refreshResult ?? result).get() }
 }
 
+/// A token provider whose result can change between polls, so a test can succeed once and then go
+/// stale on the next poll.
+private final class MutableToken: AccessTokenProviding, @unchecked Sendable {
+    var result: Result<String, Error>
+    init(_ result: Result<String, Error>) { self.result = result }
+    func validAccessToken() async throws -> String { try result.get() }
+    func refreshedAccessToken() async throws -> String { try result.get() }
+}
+
 /// Records `establishAccess()` so the grant-then-poll flow is testable.
 private final class RecordingToken: AccessTokenProviding, @unchecked Sendable {
     private(set) var establishCalls = 0
@@ -192,6 +201,33 @@ final class PollingCoordinatorTests: XCTestCase {
         await coordinator.poll()
 
         XCTAssertEqual(coordinator.status, .reauthenticate)
+    }
+
+    func testTokenStaleWithNoDataStaysLoadingNotReauthenticate() async {
+        // The monitor reads but never refreshes Claude Code's token. An expired token with no data
+        // yet must keep loading, not tell the user to sign in.
+        let api = FakeAPI(profile: .success(emptyProfile()), usage: .success(usage(1)))
+        let coordinator = makeCoordinator(api: api, token: MutableToken(.failure(APIError.tokenStale)))
+
+        await coordinator.poll()
+
+        XCTAssertEqual(coordinator.status, .loading)
+    }
+
+    func testTokenStaleKeepsLastGoodDataNotReauthenticate() async {
+        // After a good poll, an expired token holds the last good data rather than signing the user
+        // out, since Claude Code refreshes the token on its next use.
+        let api = FakeAPI(profile: .success(emptyProfile()), usage: .success(usage(20)))
+        let token = MutableToken(.success("token"))
+        let coordinator = makeCoordinator(api: api, token: token)
+        await coordinator.poll()
+        XCTAssertEqual(coordinator.status, .live)
+
+        token.result = .failure(APIError.tokenStale)
+        await coordinator.poll()
+
+        XCTAssertEqual(coordinator.status, .stale)
+        XCTAssertEqual(coordinator.snapshot?.usage.fiveHour?.utilization, 20, "last good data retained")
     }
 
     func testServerErrorWithNoDataStaysLoading() async {

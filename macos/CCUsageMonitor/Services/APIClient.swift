@@ -4,6 +4,7 @@ import Foundation
 /// and retry behavior (see PRD edge-case table).
 enum APIError: Error, Equatable {
     case unauthorized                          // 401: token rejected
+    case tokenStale                            // Claude Code's stored token has expired and the monitor does not refresh it
     case rateLimited(retryAfter: TimeInterval?) // 429: honor Retry-After up to a cap
     case serverError(Int)                      // 5xx: transient
     case endpointUnavailable(Int)              // 403, 404, 410: terminal

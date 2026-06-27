@@ -97,6 +97,11 @@ final class PollingCoordinator: ObservableObject {
             apply(try await fetchSnapshot(forceRefresh: false))
         } catch APIError.unauthorized {
             await retryAfterForcedRefresh()
+        } catch APIError.tokenStale {
+            // Claude Code's token has expired and the monitor never refreshes it, since that would
+            // rotate the shared session and sign Claude Code out. Hold the last good data until
+            // Claude Code refreshes the token on its next use.
+            status = (snapshot == nil) ? .loading : .stale
         } catch KeychainError.itemNotFound {
             status = .reauthenticate
         } catch KeychainError.accessDenied {
@@ -146,6 +151,10 @@ final class PollingCoordinator: ObservableObject {
             status = (snapshot == nil) ? .loading : .stale
         } catch APIError.network(_) {
             status = (snapshot == nil) ? .offline : .stale
+        } catch APIError.tokenStale {
+            // The token is expired and the monitor does not refresh it. Signing out would not help,
+            // so keep the last good data and wait for Claude Code to refresh.
+            status = (snapshot == nil) ? .loading : .stale
         } catch {
             // Still unauthorized, refresh failed, or token missing: the user must sign in again.
             status = .reauthenticate
