@@ -5,7 +5,7 @@ CC Usage Monitor is a menu bar app that shows your Claude Code usage and alerts 
 ## Requirements
 
 - macOS 14 or later.
-- Claude Code signed in on this Mac. The app reads its credentials from the `Claude Code-credentials` Keychain item; it never asks you for a password.
+- Claude Code signed in on this Mac, so you can seed the app's credential from its login (see Credential source below). The app never asks you for a password.
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) and the Xcode command line tools, to build from source.
 - A self-signed code-signing certificate (see the next section). You create it once.
 
@@ -53,29 +53,39 @@ If the certificate is missing, the script warns you, signs ad-hoc, and continues
 On first launch the app asks for two things:
 
 - **Notifications.** Allow them so threshold alerts can fire. The Rules tab shows a banner while notifications are off, with a button that opens Settings.
-- **Keychain.** On first launch the app asks once to read the Claude Code credentials item and once to write the refreshed token back. Choose Always Allow both times. With the certificate in place, these grants persist across launches and rebuilds, so you grant them once. The app never prompts from its background poll, so it cannot trigger a stream of dialogs: if the grant is ever lost, the window shows a Keychain message with a **Grant Access** button that re-prompts in place, and you do not relaunch.
+- **Keychain.** Needed only on the fallback path, when the credentials file below is absent. The app reads the Claude Code credentials item read-only and never writes it. On the first read, choose Always Allow. With the certificate in place, the grant persists across launches and rebuilds. The app never prompts from its background poll: if the grant is ever lost, the window shows a Keychain message with a **Grant Access** button that re-prompts in place.
 
-The app writes back so it can refresh the token and keep Claude Code in sync when Claude Code is closed. It updates only the token fields and preserves everything else in the item.
+On the Keychain path the app reads but never refreshes or rewrites the item, so it cannot rotate Claude Code's shared session and sign it out. When the stored token expires, the app holds the last good data and shows it as stale until Claude Code refreshes the token on its next use. Claude Code also rewrites the item when it rotates its own token, which can drop the access grant and make the window ask for access again. The file path below avoids both problems.
 
 ## Credential source: file or Keychain
 
-The app reads the subscription OAuth credential two ways and prefers the first it finds:
+The app reads the subscription OAuth credential two ways and prefers the file when it exists:
 
-1. **File:** `~/.config/cc-usage-monitor/credentials.json`. A file read never prompts, so the app stays silent and the Keychain dialogs never appear. Prefer this when Claude Code authenticates with a `CLAUDE_CODE_OAUTH_TOKEN` env var, because it then stops maintaining the Keychain item, or when the Keychain item's access list breaks after a macOS update.
-2. **Keychain:** Claude Code's `Claude Code-credentials` item, the path the Grant access section covers. The app uses this when the file is absent.
+1. **File (recommended):** `~/.config/cc-usage-monitor/credentials.json`. The file holds the monitor's own OAuth session. The app refreshes that session itself and writes each refresh back to the file, so it never reads the Keychain, never prompts, and never disturbs Claude Code.
+2. **Keychain (fallback):** Claude Code's `Claude Code-credentials` item, used when the file is absent. The app reads it read-only and never refreshes it, so it shows stale data once the token expires, and a Keychain rewrite by Claude Code can make the window ask for access again.
 
-Seed the file once from the Keychain credential:
+Seed the file with a session of its own, separate from the one Claude Code uses. Copying Claude Code's live credential would share one refresh-token family, so the app's next refresh would rotate that token and sign Claude Code out. Give the monitor an independent session instead:
 
 ```sh
 mkdir -p ~/.config/cc-usage-monitor
+
+# 1. Refresh Claude Code's session.
+claude /login
+
+# 2. Copy that credential into the monitor's file.
 security find-generic-password -s "Claude Code-credentials" -a "$(id -un)" -w \
   > ~/.config/cc-usage-monitor/credentials.json
 chmod 600 ~/.config/cc-usage-monitor/credentials.json
+
+# 3. Log in again so Claude Code moves to a new session and stops using the one in the file.
+claude /login
 ```
 
-Approve the one Keychain dialog. The app then refreshes the token itself and writes each refresh back to the file, so it never reads the Keychain again.
+After step 3 the file holds a session Claude Code no longer uses, so the monitor refreshes it freely while Claude Code stays signed in.
 
-The credential must carry the `user:profile` scope, which `claude /login` grants. A `claude setup-token` token will not work: it is inference-only, so the usage and profile endpoints reject it with a 403 scope error. If the file's refresh token expires, the window shows a sign-in message; run `claude /login`, then re-run the seed command above.
+The credential must carry the `user:profile` scope, which `claude /login` grants. A `claude setup-token` token will not work: it is inference-only, so the usage and profile endpoints reject it with a 403 scope error. If the file's refresh token expires while the app is not running, the window shows a sign-in message; re-run the three steps above.
+
+Only a rejected credential shows that sign-in message. A transient network or server error keeps the last good data, marks it stale, and lets the next poll retry, so a brief outage never signs you out.
 
 ## Use
 
