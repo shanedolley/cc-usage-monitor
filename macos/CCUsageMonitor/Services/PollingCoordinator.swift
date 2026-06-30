@@ -133,10 +133,21 @@ final class PollingCoordinator: ObservableObject {
     }
 
     /// A 401 can mean the token was rejected mid-flight even though it had not expired. Force one
-    /// refresh and retry; a second failure means the credentials are genuinely stale.
+    /// refresh and retry. Only an explicit auth failure on the retry (a rejected refresh or a
+    /// missing credential) signs the user out; a transient failure holds the last good data.
     private func retryAfterForcedRefresh() async {
         do {
             apply(try await fetchSnapshot(forceRefresh: true))
+        } catch APIError.unauthorized {
+            // The refresh token was rejected, or the freshly refreshed token was still refused.
+            // This is a genuine auth failure, so sign the user in again.
+            status = .reauthenticate
+        } catch KeychainError.itemNotFound {
+            // The credential is gone: the user must re-seed and sign in.
+            status = .reauthenticate
+        } catch KeychainError.invalidData {
+            // The credential is present but unreadable, so the same re-seed guidance applies.
+            status = .reauthenticate
         } catch KeychainError.accessDenied {
             status = .keychainDenied
         } catch KeychainError.interactionRequired {
@@ -156,8 +167,11 @@ final class PollingCoordinator: ObservableObject {
             // so keep the last good data and wait for Claude Code to refresh.
             status = (snapshot == nil) ? .loading : .stale
         } catch {
-            // Still unauthorized, refresh failed, or token missing: the user must sign in again.
-            status = .reauthenticate
+            // A transient refresh failure (5xx, a decoding error, or an unexpected status) is not
+            // proof that the credentials are bad. Hold the last good data and let the next poll
+            // retry, rather than forcing a needless sign-in. Only the explicit auth failures above
+            // reach `.reauthenticate`.
+            status = (snapshot == nil) ? .loading : .stale
         }
     }
 

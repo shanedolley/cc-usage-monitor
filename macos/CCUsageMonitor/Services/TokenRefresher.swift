@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// The subset of Anthropic's OAuth token response this app needs. Standard OAuth 2.0
 /// fields; the server may omit `refresh_token` when it does not rotate.
@@ -46,6 +47,8 @@ struct TokenRefresher: TokenRefreshing {
     /// URL cache (NFR-004). Tests inject their own transport and never touch this.
     private static let session = URLSession(configuration: .ephemeral)
 
+    private static let logger = Logger(subsystem: "com.shanedolley.ccusagemonitor", category: "TokenRefresher")
+
     init(endpoint: URL = URL(string: "https://console.anthropic.com/v1/oauth/token")!,
          clientID: String = "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
          userAgent: String = "cc-usage-monitor/1.0",
@@ -87,12 +90,26 @@ struct TokenRefresher: TokenRefreshing {
                 throw APIError.decoding(String(describing: error))
             }
         case 400, 401:
-            // invalid_grant: the refresh token is no longer valid; the user must reauthenticate.
+            // The refresh token was rejected; the user must reauthenticate. Log the response body
+            // so the exact reason (invalid_grant, invalid_client, and so on) is diagnosable. A 4xx
+            // token-endpoint body carries an OAuth `error` code, not a secret, so logging it as
+            // public is safe; the 2xx body, which does hold tokens, is never logged.
+            Self.logger.error("Refresh rejected (HTTP \(http.statusCode, privacy: .public)): \(Self.bodyText(data), privacy: .public)")
             throw APIError.unauthorized
         case 500...599:
             throw APIError.serverError(http.statusCode)
         default:
+            // An unexpected status is opaque, so log its body to aid diagnosis. A non-2xx body
+            // never carries tokens.
+            Self.logger.error("Refresh returned unexpected HTTP \(http.statusCode, privacy: .public): \(Self.bodyText(data), privacy: .public)")
             throw APIError.unexpectedStatus(http.statusCode)
         }
+    }
+
+    /// Decodes a non-2xx response body to text for logging, truncated so a stray large body cannot
+    /// flood the log. Only ever called on error responses, which carry no tokens.
+    private static func bodyText(_ data: Data) -> String {
+        let text = String(decoding: data, as: UTF8.self)
+        return text.count > 512 ? String(text.prefix(512)) + "…(truncated)" : text
     }
 }
