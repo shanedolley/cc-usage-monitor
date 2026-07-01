@@ -30,14 +30,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var clickObserver: NSObjectProtocol?
 
     override init() {
-        // The monitor reads the access token Claude Code keeps in the Keychain but never refreshes
-        // it. Anthropic rotates refresh tokens, so a second refresher would rotate the shared OAuth
-        // session out from under Claude Code and sign it out. A `NoRefreshTokenRefresher` and a nil
-        // writer make TokenManager read-only: it uses a valid token and reports an expired one as
-        // stale until Claude Code refreshes it.
-        let tokenManager = TokenManager(keychain: KeychainReader(),
+        // Prefer the credentials file once it is seeded. The file holds the monitor's own OAuth
+        // session, independent of Claude Code's, so the monitor refreshes it through the same read,
+        // refresh, and write-back loop without rotating the session Claude Code uses. File reads
+        // never prompt, so the menu bar app stays silent and the Keychain dialogs never appear.
+        //
+        // Without the file, fall back to reading Claude Code's Keychain credential read-only. A
+        // `NoRefreshTokenRefresher` and a nil writer mean the monitor never refreshes or rewrites
+        // the shared token, so it cannot rotate Claude Code's session and sign it out. It uses a
+        // valid token and reports an expired one as stale until Claude Code refreshes it.
+        let tokenManager: TokenManager
+        if FileCredentialStore.isConfigured() {
+            let store = FileCredentialStore()
+            tokenManager = TokenManager(keychain: store, refresher: TokenRefresher(), writer: store)
+        } else {
+            tokenManager = TokenManager(keychain: KeychainReader(),
                                         refresher: NoRefreshTokenRefresher(),
                                         writer: nil)
+        }
         coordinator = PollingCoordinator(api: APIClient(), tokenProvider: tokenManager)
         notificationService = NotificationService()
         rulesEngine = RulesEngine(notificationService: notificationService)

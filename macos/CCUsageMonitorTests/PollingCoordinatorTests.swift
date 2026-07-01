@@ -297,6 +297,52 @@ final class PollingCoordinatorTests: XCTestCase {
                           "a 429 on the retry is rate-limiting, not an auth failure")
     }
 
+    func test401ThenServerErrorOnRetryStaysLoadingNotReauthenticate() async {
+        // A 5xx on the forced refresh is transient, not an auth failure. With no data yet the app
+        // keeps loading; it must not tell the user to sign in.
+        let api = SequencedAPI(profile: .success(emptyProfile()),
+                               usage: [.failure(APIError.unauthorized),
+                                       .failure(APIError.serverError(503))])
+        let coordinator = makeCoordinator(api: api)
+
+        await coordinator.poll()
+
+        XCTAssertEqual(coordinator.status, .loading,
+                       "a transient 5xx on the retry must not force a sign-in")
+    }
+
+    func test401ThenServerErrorOnRetryKeepsLastGoodDataNotReauthenticate() async {
+        // After a good poll, a 401 followed by a 5xx on the forced refresh holds the last good data
+        // as stale rather than signing the user out over a transient server error.
+        let api = SequencedAPI(profile: .success(emptyProfile()),
+                               usage: [.success(usage(20)),
+                                       .failure(APIError.unauthorized),
+                                       .failure(APIError.serverError(503))])
+        let coordinator = makeCoordinator(api: api)
+        await coordinator.poll()
+        XCTAssertEqual(coordinator.status, .live)
+
+        await coordinator.poll()
+
+        XCTAssertEqual(coordinator.status, .stale,
+                       "a transient 5xx on the retry keeps the last good data, not reauthenticate")
+        XCTAssertEqual(coordinator.snapshot?.usage.fiveHour?.utilization, 20, "last good data retained")
+    }
+
+    func test401ThenDecodingErrorOnRetryStaysLoadingNotReauthenticate() async {
+        // A decoding failure on the forced refresh is a transient or upstream-format problem, not a
+        // rejected credential, so it must not force a sign-in.
+        let api = SequencedAPI(profile: .success(emptyProfile()),
+                               usage: [.failure(APIError.unauthorized),
+                                       .failure(APIError.decoding("bad body"))])
+        let coordinator = makeCoordinator(api: api)
+
+        await coordinator.poll()
+
+        XCTAssertEqual(coordinator.status, .loading,
+                       "a decoding error on the retry must not force a sign-in")
+    }
+
     func test429SetsBackoffCappedAtFiveMinutes() async {
         let api = FakeAPI(profile: .success(emptyProfile()),
                           usage: .failure(APIError.rateLimited(retryAfter: 600)))

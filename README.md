@@ -28,4 +28,6 @@ Each platform versions and releases independently using a tag prefix (`macos-vX.
 
 ## What it reads
 
-The app reads, and on token refresh rewrites, Claude Code's own credential store (the macOS Keychain, or `%USERPROFILE%\.claude\.credentials.json` on Windows). It never asks for a password and sends data only to your own Anthropic account. Per-platform detail lives in each app's `install.md`.
+Each app reads an OAuth credential seeded from your Claude Code login and sends data only to your own Anthropic account. It never asks for a password.
+
+The two platforms manage that credential differently. On macOS the app keeps its own independent session in `~/.config/cc-usage-monitor/credentials.json`, which it refreshes itself, and it falls back to reading Claude Code's Keychain credential read-only. The Windows app (in development) reads and refreshes Claude Code's token file at `%USERPROFILE%\.claude\.credentials.json`. Per-platform detail lives in each app's `install.md`.
