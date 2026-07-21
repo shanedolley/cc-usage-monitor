@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import Network
 import AppKit
+import os
 
 /// A successful fetch: profile, usage, and when it was fetched.
 struct UsageSnapshot: Equatable {
@@ -21,21 +22,60 @@ enum LoadStatus: Equatable {
     case endpointUnavailable // persistent API failure (403, 404, 410); the app keeps polling
 }
 
-/// Drives the 60-second poll loop, owns the published UI state, pauses when the network is
-/// down, and refetches on wake. UI updates happen on the main actor.
+/// Drives the poll loop, owns the published UI state, pauses when the network is down, and refetches
+/// on wake. UI updates happen on the main actor.
 @MainActor
 final class PollingCoordinator: ObservableObject {
     @Published private(set) var snapshot: UsageSnapshot?
-    @Published private(set) var status: LoadStatus = .loading
+    /// Logged on every change. A menu bar app shows one small icon, so when it stops updating there
+    /// is nothing on screen to distinguish "waiting", "denied", and "stale". Without this, diagnosing
+    /// a stuck app means guessing from a screenshot.
+    @Published private(set) var status: LoadStatus = .loading {
+        didSet {
+            guard status != oldValue else { return }
+            Self.logger.info("Status \(String(describing: oldValue), privacy: .public) -> \(String(describing: self.status), privacy: .public)")
+        }
+    }
     @Published private(set) var lastUpdated: Date?
+
+    private static let logger = Logger(subsystem: "com.shanedolley.ccusagemonitor", category: "PollingCoordinator")
+
+    /// Seconds between polls. Five minutes, not one: at 60s the app sent about 1,440 requests a day
+    /// to `/api/oauth/usage`, which rate-limited it for hours at a time (observed 2026-07-21). Usage
+    /// figures move slowly enough that five minutes still reads as live, and it cuts the daily
+    /// request count to roughly 288.
+    static let defaultInterval: TimeInterval = 300
 
     let interval: TimeInterval
     /// How long to wait before the next poll. Normally `interval`; a 429 raises it to the
     /// `Retry-After` value, capped at `maxBackoff`. A successful poll resets it.
     private(set) var nextDelay: TimeInterval
 
-    /// The most a 429 `Retry-After` can push the next poll out: five minutes.
-    static let maxBackoff: TimeInterval = 300
+    /// The most a rate limit can push the next poll out: thirty minutes. It has to exceed
+    /// `defaultInterval` by a good margin or the escalation below has nowhere to go, and a limit
+    /// seen live lasted hours, so backing off well past the normal interval is the point.
+    static let maxBackoff: TimeInterval = 1800
+
+    /// How many polls in a row have been rate-limited. Drives the escalation below and resets on any
+    /// successful fetch.
+    private var consecutiveRateLimits = 0
+
+    /// Turns a 429 into the delay before the next poll, clamped to `interval...maxBackoff`.
+    ///
+    /// The floor matters as much as the cap. Anthropic's usage endpoint answers `Retry-After: 0`,
+    /// which taken literally means "retry now": the loop slept zero seconds, hammered the endpoint,
+    /// and kept its own rate limit alive, leaving the rings frozen indefinitely.
+    ///
+    /// Because that header is always `0`, it carries no timing information, so the delay comes from
+    /// the run of consecutive failures instead: each one doubles the wait, up to the cap. A limit
+    /// observed live lasted hours, which a fixed retry would have spent hammering.
+    private func backoff(for retryAfter: TimeInterval?) -> TimeInterval {
+        consecutiveRateLimits += 1
+        let escalated = interval * pow(2, Double(consecutiveRateLimits - 1))
+        // A `Retry-After` longer than our own escalation is the server asking for more time, so it
+        // still wins; anything shorter is ignored.
+        return min(max(escalated, retryAfter ?? 0), Self.maxBackoff)
+    }
 
     private let api: APIClientProtocol
     private let tokenProvider: AccessTokenProviding
@@ -50,7 +90,7 @@ final class PollingCoordinator: ObservableObject {
     init(api: APIClientProtocol,
          tokenProvider: AccessTokenProviding,
          clock: ClockProtocol = SystemClock(),
-         interval: TimeInterval = 60) {
+         interval: TimeInterval = PollingCoordinator.defaultInterval) {
         self.api = api
         self.tokenProvider = tokenProvider
         self.clock = clock
@@ -95,30 +135,52 @@ final class PollingCoordinator: ObservableObject {
         }
         do {
             apply(try await fetchSnapshot(forceRefresh: false))
-        } catch APIError.unauthorized {
-            await retryAfterForcedRefresh()
-        } catch APIError.tokenStale {
-            // Claude Code's token has expired and the monitor never refreshes it, since that would
-            // rotate the shared session and sign Claude Code out. Hold the last good data until
-            // Claude Code refreshes the token on its next use.
-            status = (snapshot == nil) ? .loading : .stale
-        } catch KeychainError.itemNotFound {
-            status = .reauthenticate
-        } catch KeychainError.accessDenied {
-            status = .keychainDenied
-        } catch KeychainError.interactionRequired {
-            // A background read found no grant; show the keychain state without firing a modal.
-            // The user re-grants via Grant Access, which prompts once.
-            status = .keychainDenied
-        } catch APIError.endpointUnavailable(_) {
-            status = .endpointUnavailable
-        } catch APIError.rateLimited(let retryAfter) {
-            nextDelay = min(retryAfter ?? interval, Self.maxBackoff)
-            status = (snapshot == nil) ? .loading : .stale
-        } catch APIError.network(_) {
-            status = (snapshot == nil) ? .offline : .stale
         } catch {
-            // 5xx, decoding, and anything else: keep the last good data if we have it.
+            // Logged before the handlers below re-dispatch on the same error, because a failing poll
+            // that leaves the status unchanged is otherwise invisible: with no data yet, every
+            // failure maps back to `.loading`, so the status log stays silent and the app looks
+            // hung. This names the actual cause on every cycle.
+            Self.logger.info("Poll failed: \(String(describing: error), privacy: .public)")
+            await handle(error)
+        }
+    }
+
+    /// Maps a failed poll to the published status. Split out of `poll()` so the failure can be
+    /// logged once, in one place, before it is classified.
+    private func handle(_ error: Error) async {
+        switch error {
+        case let apiError as APIError:
+            switch apiError {
+            case .unauthorized:
+                await retryAfterForcedRefresh()
+            case .tokenStale:
+                // Claude Code's token has expired and the monitor never refreshes it, since that
+                // would rotate the shared session and sign Claude Code out. Hold the last good data
+                // until Claude Code refreshes the token on its next use.
+                status = (snapshot == nil) ? .loading : .stale
+            case .endpointUnavailable:
+                status = .endpointUnavailable
+            case .rateLimited(let retryAfter):
+                nextDelay = backoff(for: retryAfter)
+                status = (snapshot == nil) ? .loading : .stale
+            case .network:
+                status = (snapshot == nil) ? .offline : .stale
+            default:
+                // 5xx, decoding, and anything else: keep the last good data if we have it.
+                status = (snapshot == nil) ? .loading : .stale
+            }
+        case let keychainError as KeychainError:
+            switch keychainError {
+            case .itemNotFound:
+                status = .reauthenticate
+            case .accessDenied, .interactionRequired:
+                // A background read found no grant; show the keychain state without firing a modal.
+                // The user re-grants via Grant Access, which prompts once.
+                status = .keychainDenied
+            default:
+                status = (snapshot == nil) ? .loading : .stale
+            }
+        default:
             status = (snapshot == nil) ? .loading : .stale
         }
     }
@@ -130,6 +192,22 @@ final class PollingCoordinator: ObservableObject {
     func establishAccess() async {
         try? await tokenProvider.establishAccess()
         await poll()
+    }
+
+    /// The launch path: start the loop, then ask for the Keychain grant.
+    ///
+    /// The loop starts *first* because the grant can present a modal dialog and block until the user
+    /// answers it. Awaiting that before starting meant an unanswered dialog stopped the app polling
+    /// at all, with nothing on screen but a spinner. Starting first costs nothing: a poll with no
+    /// grant yet fails to `.keychainDenied`, which is the accurate state, and the poll after the
+    /// grant recovers on its own.
+    ///
+    /// Separate from `establishAccess()` because that one polls as well. Calling it and then
+    /// `start()` fired two full fetches about 300ms apart on every launch, wasted work that also
+    /// helped trip the usage endpoint's rate limit before the first ring was drawn.
+    func startAfterEstablishingAccess() async {
+        start()
+        try? await tokenProvider.establishAccess()
     }
 
     /// A 401 can mean the token was rejected mid-flight even though it had not expired. Force one
@@ -158,7 +236,7 @@ final class PollingCoordinator: ObservableObject {
             status = .endpointUnavailable
         } catch APIError.rateLimited(let retryAfter) {
             // A 429 on the retry is rate-limiting, not an auth failure: back off, do not sign out.
-            nextDelay = min(retryAfter ?? interval, Self.maxBackoff)
+            nextDelay = backoff(for: retryAfter)
             status = (snapshot == nil) ? .loading : .stale
         } catch APIError.network(_) {
             status = (snapshot == nil) ? .offline : .stale
@@ -190,6 +268,8 @@ final class PollingCoordinator: ObservableObject {
         snapshot = snap
         lastUpdated = snap.fetchedAt
         status = .live
+        // The escalated backoff must not outlive the rate limit that caused it.
+        consecutiveRateLimits = 0
     }
 
     private func startPolling() {
@@ -197,7 +277,7 @@ final class PollingCoordinator: ObservableObject {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.poll()
-                let delay = self?.nextDelay ?? 60
+                let delay = self?.nextDelay ?? Self.defaultInterval
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
         }

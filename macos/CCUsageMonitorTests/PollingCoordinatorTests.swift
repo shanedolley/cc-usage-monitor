@@ -30,6 +30,43 @@ private final class MutableToken: AccessTokenProviding, @unchecked Sendable {
     func refreshedAccessToken() async throws -> String { try result.get() }
 }
 
+/// Stands in for a Keychain grant sitting behind a modal dialog the user has not answered: the call
+/// never returns. Mirrors the live failure where `SecurityAgent` held a prompt open and the app,
+/// awaiting the grant before starting its loop, never polled.
+private struct BlockingGrantToken: AccessTokenProviding {
+    func validAccessToken() async throws -> String { "token" }
+    func establishAccess() async throws {
+        try await Task.sleep(nanoseconds: .max)
+    }
+}
+
+/// Polls `condition` until it holds or the timeout expires, so a test waits for real state instead
+/// of a fixed sleep sized by guesswork.
+private func waitUntil(timeout: TimeInterval = 2,
+                       _ condition: () async -> Bool) async {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if await condition() { return }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+}
+
+/// Counts fetches, so a test can prove how many the launch path makes. An actor so the count is
+/// async-safe.
+private actor CountingAPI: APIClientProtocol {
+    private let profileValue: ProfileResponse
+    private let usageValue: UsageResponse
+    private(set) var calls = 0
+
+    init(profile: ProfileResponse, usage: UsageResponse) {
+        self.profileValue = profile
+        self.usageValue = usage
+    }
+
+    func fetchProfile(accessToken: String) async throws -> ProfileResponse { calls += 1; return profileValue }
+    func fetchUsage(accessToken: String) async throws -> UsageResponse { calls += 1; return usageValue }
+}
+
 /// Records `establishAccess()` so the grant-then-poll flow is testable.
 private final class RecordingToken: AccessTokenProviding, @unchecked Sendable {
     private(set) var establishCalls = 0
@@ -343,14 +380,34 @@ final class PollingCoordinatorTests: XCTestCase {
                        "a decoding error on the retry must not force a sign-in")
     }
 
-    func test429SetsBackoffCappedAtFiveMinutes() async {
+    /// The interval is a rate-limit control, not a cosmetic preference: at 60s the app made roughly
+    /// 1,440 requests a day to the usage endpoint and was rate-limited for hours. The cap must stay
+    /// clear of it, or the escalation in `backoff(for:)` has nowhere to climb.
+    func testDefaultIntervalIsFiveMinutesAndBelowTheBackoffCap() {
+        XCTAssertEqual(PollingCoordinator.defaultInterval, 300)
+        XCTAssertGreaterThan(PollingCoordinator.maxBackoff, PollingCoordinator.defaultInterval)
+    }
+
+    func test429SetsBackoffCappedAtMaxBackoff() async {
+        let api = FakeAPI(profile: .success(emptyProfile()),
+                          usage: .failure(APIError.rateLimited(retryAfter: 9000)))
+        let coordinator = makeCoordinator(api: api)
+
+        await coordinator.poll()
+
+        XCTAssertEqual(coordinator.nextDelay, PollingCoordinator.maxBackoff,
+                       "an outsized Retry-After is capped")
+    }
+
+    /// A `Retry-After` longer than our own escalation is the server asking for more time, so it wins.
+    func test429HonorsRetryAfterLongerThanEscalation() async {
         let api = FakeAPI(profile: .success(emptyProfile()),
                           usage: .failure(APIError.rateLimited(retryAfter: 600)))
         let coordinator = makeCoordinator(api: api)
 
         await coordinator.poll()
 
-        XCTAssertEqual(coordinator.nextDelay, 300, "Retry-After is capped at 5 minutes")
+        XCTAssertEqual(coordinator.nextDelay, 600, "600s beats the first escalation step of 60s")
     }
 
     func test429HonorsRetryAfterUnderCap() async {
@@ -361,6 +418,106 @@ final class PollingCoordinatorTests: XCTestCase {
         await coordinator.poll()
 
         XCTAssertEqual(coordinator.nextDelay, 120)
+    }
+
+    /// Anthropic's usage endpoint answers `Retry-After: 0` when it rate-limits. Taken literally that
+    /// means "retry immediately", so the poll loop slept zero seconds and hammered the endpoint,
+    /// which kept the rate limit alive indefinitely: the app became the reason it stayed limited.
+    /// Observed live on 2026-07-21, with the rings frozen and the status stuck on stale.
+    func test429WithZeroRetryAfterDoesNotBusyLoop() async {
+        let api = FakeAPI(profile: .success(emptyProfile()),
+                          usage: .failure(APIError.rateLimited(retryAfter: 0)))
+        let coordinator = makeCoordinator(api: api)
+
+        await coordinator.poll()
+
+        XCTAssertGreaterThanOrEqual(coordinator.nextDelay, 60,
+                                    "a zero Retry-After must never poll faster than the normal interval")
+    }
+
+    /// The Keychain grant can block on a modal dialog the user has not answered. The poll loop must
+    /// not be gated on it, or an ignored dialog leaves the app showing a spinner forever, never
+    /// polling. Observed live on 2026-07-21 with a `SecurityAgent` prompt open and the app silent.
+    func testLoopStartsEvenWhenTheGrantNeverCompletes() async {
+        let api = CountingAPI(profile: emptyProfile(), usage: usage(1))
+        let coordinator = makeCoordinator(api: api, token: BlockingGrantToken())
+
+        // Not awaited: the grant never returns, which is the condition under test. The app calls this
+        // from a detached Task for the same reason.
+        let launch = Task { await coordinator.startAfterEstablishingAccess() }
+        await waitUntil { await api.calls >= 2 }
+        launch.cancel()
+        coordinator.stop()
+
+        let calls = await api.calls
+        XCTAssertGreaterThanOrEqual(calls, 2, "the loop must poll without waiting on the grant")
+    }
+
+    /// The launch path must fetch once, not twice. Two fetches ~300ms apart was wasted work and a
+    /// way to trip the usage endpoint's rate limit before the first ring was drawn.
+    func testLaunchPathFetchesOnce() async {
+        let api = CountingAPI(profile: emptyProfile(), usage: usage(1))
+        let coordinator = makeCoordinator(api: api)
+
+        await coordinator.startAfterEstablishingAccess()
+        // The loop polls on its own task, so wait for the first fetch rather than assuming it has
+        // landed. The duplicate this guards against arrived ~300ms after the first, so settle well
+        // past that before counting; the next scheduled poll is a full interval away.
+        await waitUntil { await api.calls >= 2 }
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        coordinator.stop()
+
+        let calls = await api.calls
+        XCTAssertEqual(calls, 2, "one poll fetches profile and usage once each, not twice")
+    }
+
+    /// Anthropic's usage endpoint sends `Retry-After: 0` on every rate limit, so the header carries
+    /// no timing information at all. Retrying at a fixed interval against a limit that lasts hours
+    /// just sustains the pressure, so consecutive 429s must back off progressively.
+    func test429BacksOffProgressivelyWhileLimited() async {
+        let api = FakeAPI(profile: .success(emptyProfile()),
+                          usage: .failure(APIError.rateLimited(retryAfter: 0)))
+        let coordinator = makeCoordinator(api: api)
+
+        await coordinator.poll()
+        let first = coordinator.nextDelay
+        await coordinator.poll()
+        let second = coordinator.nextDelay
+        await coordinator.poll()
+        let third = coordinator.nextDelay
+
+        XCTAssertGreaterThan(second, first, "a second consecutive 429 must wait longer")
+        XCTAssertGreaterThan(third, second, "and a third longer still")
+        XCTAssertLessThanOrEqual(third, PollingCoordinator.maxBackoff, "capped at five minutes")
+    }
+
+    /// The backoff must not outlive the condition: once a poll succeeds, the next one is due at the
+    /// normal interval, not at the escalated delay.
+    func testSuccessResetsTheRateLimitBackoff() async {
+        let api = FakeAPI(profile: .success(emptyProfile()),
+                          usage: .failure(APIError.rateLimited(retryAfter: 0)))
+        let coordinator = makeCoordinator(api: api)
+        await coordinator.poll()
+        await coordinator.poll()
+        XCTAssertGreaterThan(coordinator.nextDelay, 60)
+
+        api.usageResult = .success(usage(30))
+        await coordinator.poll()
+
+        XCTAssertEqual(coordinator.status, .live)
+        XCTAssertEqual(coordinator.nextDelay, 60, "a success returns to the normal interval")
+    }
+
+    /// Same guarantee for a small positive value: anything under the poll interval is still faster
+    /// than the app ever needs to poll.
+    func test429WithTinyRetryAfterIsFlooredAtInterval() async {
+        let api = FakeAPI(profile: .success(emptyProfile()),
+                          usage: .failure(APIError.rateLimited(retryAfter: 3)))
+        let coordinator = makeCoordinator(api: api)
+
+        await coordinator.poll()
+
+        XCTAssertEqual(coordinator.nextDelay, 60)
     }
 
     func test429WithoutRetryAfterFallsBackToInterval() async {
@@ -378,7 +535,7 @@ final class PollingCoordinatorTests: XCTestCase {
                           usage: .failure(APIError.rateLimited(retryAfter: 600)))
         let coordinator = makeCoordinator(api: api)
         await coordinator.poll()
-        XCTAssertEqual(coordinator.nextDelay, 300)
+        XCTAssertEqual(coordinator.nextDelay, 600)
 
         api.usageResult = .success(usage(5))
         await coordinator.poll()

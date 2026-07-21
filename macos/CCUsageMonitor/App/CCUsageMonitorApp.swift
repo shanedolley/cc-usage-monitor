@@ -24,6 +24,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let notificationService: NotificationService
     private let persistence = RulePersistence()
     private let bridge: UsageRulesBridge
+    /// Recorded at launch beside the store choice below, so the reauthenticate screen gives the
+    /// advice that matches the mode actually running.
+    private let credentialSource: CredentialSource
 
     private var menuBarController: MenuBarController?
     private var cancellables = Set<AnyCancellable>()
@@ -43,10 +46,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if FileCredentialStore.isConfigured() {
             let store = FileCredentialStore()
             tokenManager = TokenManager(keychain: store, refresher: TokenRefresher(), writer: store)
+            credentialSource = .file
         } else {
             tokenManager = TokenManager(keychain: KeychainReader(),
                                         refresher: NoRefreshTokenRefresher(),
                                         writer: nil)
+            credentialSource = .keychain
         }
         coordinator = PollingCoordinator(api: APIClient(), tokenProvider: tokenManager)
         notificationService = NotificationService()
@@ -70,10 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { _ = await notificationService.requestAuthorization() }
         // Establish the Keychain grant once (the only interactive Keychain prompt), then start the
         // poll loop, which reads non-interactively and never prompts again.
-        Task {
-            await coordinator.establishAccess()
-            coordinator.start()
-        }
+        Task { await coordinator.startAfterEstablishingAccess() }
     }
 
     /// A menu bar accessory keeps running after its window closes.
@@ -124,7 +126,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let root = AppRootView(coordinator: coordinator,
                                rulesEngine: rulesEngine,
                                isAuthorized: { [notificationService] in await notificationService.isAuthorized() },
-                               currentUsage: { [weak coordinator] in coordinator?.snapshot?.usage })
+                               currentUsage: { [weak coordinator] in coordinator?.snapshot?.usage },
+                               credentialSource: credentialSource)
         let window = NSWindow(contentViewController: NSHostingController(rootView: root))
         window.title = "Claude Code Usage"
         window.styleMask = [.titled, .closable, .miniaturizable]

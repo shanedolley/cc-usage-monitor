@@ -8,12 +8,15 @@ struct AppRootView: View {
     /// authorization state rather than a value captured at launch.
     var isAuthorized: () async -> Bool
     var currentUsage: () -> UsageResponse?
+    /// Which store the credential comes from, so the reauthenticate screen gives the advice that
+    /// matches the running mode.
+    var credentialSource: CredentialSource = .keychain
 
     @State private var notificationsAuthorized = true
 
     var body: some View {
         TabView {
-            UsageDetailView(coordinator: coordinator)
+            UsageDetailView(coordinator: coordinator, credentialSource: credentialSource)
                 .tabItem { Label("Usage", systemImage: "gauge.with.dots.needle.67percent") }
 
             RulesView(rulesEngine: rulesEngine,

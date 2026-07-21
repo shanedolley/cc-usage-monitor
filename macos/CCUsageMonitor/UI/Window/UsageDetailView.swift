@@ -6,6 +6,9 @@ import AppKit
 /// and endpoint states.
 struct UsageDetailView: View {
     @ObservedObject var coordinator: PollingCoordinator
+    /// Which store the credential comes from. The reauthenticate screen needs it because the two
+    /// modes have opposite fixes; defaults to the Keychain, the mode a fresh install runs in.
+    var credentialSource: CredentialSource = .keychain
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -36,8 +39,15 @@ struct UsageDetailView: View {
         case .loading where coordinator.snapshot == nil:
             ProgressView("Loading usage…").frame(maxWidth: .infinity, minHeight: 120)
         case .reauthenticate:
-            MessageView(title: "Claude Code sign-in needed",
-                        message: "Re-seed ~/.config/cc-usage-monitor/credentials.json from a fresh claude /login (see install.md), then relaunch this app.")
+            // The advice depends on which store the credential comes from: file mode is fixed by
+            // re-seeding and is made worse by signing in, Keychain mode is fixed by signing in. A
+            // fixed message is wrong in one mode or the other, which is what made the July outage
+            // look unfixable.
+            let advice = credentialSource.reauthenticateAdvice
+            MessageView(title: advice.title,
+                        message: advice.message,
+                        actionTitle: credentialSource.offersSignIn ? "Sign in to Claude Code" : nil,
+                        action: credentialSource.offersSignIn ? { ClaudeLoginLauncher.launch() } : nil)
         case .keychainDenied:
             KeychainPermissionView { await coordinator.establishAccess() }
         case .endpointUnavailable:
@@ -175,16 +185,54 @@ struct KeychainPermissionView: View {
     }
 }
 
-/// A titled message used for the reauthenticate and endpoint states.
+/// A titled message used for the reauthenticate and endpoint states. `action` adds a button for the
+/// states that have a real fix to offer.
 struct MessageView: View {
     let title: String
     let message: String
+    var actionTitle: String?
+    var action: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.subheadline).bold()
             Text(message).font(.caption).foregroundStyle(.secondary)
+            if let actionTitle, let action {
+                Button(actionTitle, action: action).padding(.top, 4)
+            }
         }
         .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
+    }
+}
+
+/// Opens `claude /login` in Terminal.
+///
+/// The sign-in cannot happen inside this app. Anthropic's OAuth client rejects a third-party
+/// authorization-code flow (verified against the real endpoints with the exact parameters the Claude
+/// Code binary uses, on both the manual and localhost redirects), so the app cannot mint a session of
+/// its own. `claude /login` is an interactive terminal program, so the next best thing is to start it
+/// in a terminal and let the user finish there.
+enum ClaudeLoginLauncher {
+    /// Runs the login in Terminal and brings it to the front. AppleScript, rather than launching the
+    /// binary directly, because the login is an interactive TUI: it needs a real terminal to draw in
+    /// and to take keystrokes.
+    static func launch(runner: (String) -> Void = runAppleScript) {
+        runner("""
+        tell application "Terminal"
+            activate
+            do script "claude /login"
+        end tell
+        """)
+    }
+
+    private static func runAppleScript(_ source: String) {
+        // `NSAppleScript` needs the Apple Events entitlement to drive another app, so a sandboxed or
+        // unentitled build fails here rather than silently doing nothing. The error is surfaced in
+        // the log; the message on screen still names the command to run by hand.
+        var error: NSDictionary?
+        NSAppleScript(source: source)?.executeAndReturnError(&error)
+        if let error {
+            NSLog("Could not open Terminal for claude /login: \(error)")
+        }
     }
 }

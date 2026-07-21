@@ -4,7 +4,7 @@ Guidance for working in this repository.
 
 ## What this is
 
-The Claude Code Usage Monitor: a desktop app that shows your Claude Code account usage at a glance and alerts you before you hit a limit. It reads the OAuth token Claude Code already stores, polls the Anthropic usage endpoints every 60 seconds, and shows the numbers in the menu bar (macOS) or system tray (Windows) as donut rings, with threshold notifications.
+The Claude Code Usage Monitor: a desktop app that shows your Claude Code account usage at a glance and alerts you before you hit a limit. It reads the OAuth token Claude Code already stores, polls the Anthropic usage endpoints every five minutes, and shows the numbers in the menu bar (macOS) or system tray (Windows) as donut rings, with threshold notifications.
 
 ## Monorepo layout
 

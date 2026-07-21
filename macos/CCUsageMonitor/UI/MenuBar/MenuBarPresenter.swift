@@ -29,7 +29,7 @@ enum MenuBarPresenter {
     static func render(snapshot: UsageSnapshot?, status: LoadStatus) -> MenuBarModel {
         switch status {
         case .reauthenticate:
-            return glyph("!", "Claude Code credentials expired, re-seed then relaunch", .critical)
+            return glyph("!", "Monitor credential expired, re-seed then relaunch", .critical)
         case .keychainDenied:
             return glyph("!", "Keychain access needed for usage", .critical)
         case .endpointUnavailable:
