@@ -64,6 +64,36 @@ private final class FakeWriter: KeychainWriting, @unchecked Sendable {
     }
 }
 
+/// Fails its first `failures` calls, then succeeds. Models a transient network error on a refresh
+/// that other callers have already joined.
+private final class FlakyRefresher: TokenRefreshing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _calls = 0
+    private(set) var presented: [String] = []
+    let result: KeychainCredential
+    let failures: Int
+    let delayMs: UInt64
+
+    init(result: KeychainCredential, failures: Int, delayMs: UInt64 = 60) {
+        self.result = result
+        self.failures = failures
+        self.delayMs = delayMs
+    }
+
+    var calls: Int { lock.lock(); defer { lock.unlock() }; return _calls }
+
+    func refresh(using credential: KeychainCredential, now: Date) async throws -> KeychainCredential {
+        lock.lock()
+        _calls += 1
+        let attempt = _calls
+        presented.append(credential.refreshToken)
+        lock.unlock()
+        if delayMs > 0 { try? await Task.sleep(nanoseconds: delayMs * 1_000_000) }
+        if attempt <= failures { throw APIError.network("transient") }
+        return result
+    }
+}
+
 private struct FixedClock: ClockProtocol {
     let date: Date
     func now() -> Date { date }
@@ -240,5 +270,97 @@ final class TokenManagerTests: XCTestCase {
         XCTAssertEqual(writer.lastAllowInteraction, true, "the explicit grant writes interactively")
         XCTAssertEqual(writer.updates.count, 1, "it re-writes the same tokens to grant write access")
         XCTAssertEqual(writer.updates.first?.accessToken, "at")
+    }
+
+    // MARK: - Surviving a failed write-back
+
+    /// The refresh burns the old refresh token server-side the moment it succeeds, so a failed
+    /// write-back leaves a dead credential in the store. Until now the failure was swallowed and
+    /// never logged: the app kept working on the in-memory token, then read the dead one from the
+    /// store on the next cycle and signed the user out permanently. This killed the credential twice
+    /// in production. The refreshed credential must survive in memory and be used in preference to
+    /// the stale stored one.
+    func testFailedWriteBackDoesNotLoseTheRefreshedCredential() async throws {
+        // The store keeps handing back the stale credential, exactly as a failed write leaves it.
+        let keychain = FakeKeychain(credential(expiresAtMs: 0, accessToken: "stale"))
+        let refresher = FakeRefresher(result: credential(expiresAtMs: 99_000_000, accessToken: "refreshed"))
+        let writer = FakeWriter()
+        writer.error = KeychainError.unexpectedStatus(-1)
+        let manager = TokenManager(keychain: keychain, refresher: refresher, writer: writer,
+                                   clock: FixedClock(date: now))
+
+        let first = try await manager.validAccessToken()
+        XCTAssertEqual(first, "refreshed")
+        XCTAssertEqual(refresher.calls, 1)
+
+        // The critical assertion: the next cycle must not fall back to the burned stored token.
+        let second = try await manager.validAccessToken()
+
+        XCTAssertEqual(second, "refreshed", "the refreshed credential must survive a failed write")
+        XCTAssertEqual(refresher.calls, 1, "and must not burn another refresh token to get there")
+    }
+
+    /// A newer credential in the store still wins, so a token Claude Code refreshed is picked up
+    /// rather than shadowed by a stale in-memory copy.
+    func testStoreWinsWhenItHoldsANewerCredential() async throws {
+        let keychain = FakeKeychain(credential(expiresAtMs: 0, accessToken: "stale"),
+                                    credential(expiresAtMs: 99_000_000, accessToken: "newer-from-store"))
+        let refresher = FakeRefresher(result: credential(expiresAtMs: 50_000_000, accessToken: "refreshed"))
+        let writer = FakeWriter()
+        let manager = TokenManager(keychain: keychain, refresher: refresher, writer: writer,
+                                   clock: FixedClock(date: now))
+
+        _ = try await manager.validAccessToken()          // refreshes, caches "refreshed"
+        let token = try await manager.validAccessToken()  // store now offers a later expiry
+
+        XCTAssertEqual(token, "newer-from-store")
+    }
+
+    // MARK: - Single-flight
+
+    /// A forced refresh used to bypass the single-flight join entirely, so it ran concurrently with
+    /// an in-flight refresh and both presented the same single-use refresh token. One was rejected,
+    /// which surfaced as a spurious sign-out even though the stored credential was fine.
+    func testForcedRefreshDoesNotRunConcurrentlyWithAnInFlightRefresh() async throws {
+        let keychain = FakeKeychain(credential(expiresAtMs: 0, accessToken: "stale"))
+        let refresher = FakeRefresher(result: credential(expiresAtMs: 99_000_000, accessToken: "refreshed"),
+                                      delayMs: 120)
+        let writer = FakeWriter()
+        let manager = TokenManager(keychain: keychain, refresher: refresher, writer: writer,
+                                   clock: FixedClock(date: now))
+
+        async let normal = manager.validAccessToken()
+        async let forced = manager.refreshedAccessToken()
+        let (a, b) = try await (normal, forced)
+
+        XCTAssertEqual(a, "refreshed")
+        XCTAssertEqual(b, "refreshed")
+        XCTAssertEqual(refresher.calls, 1,
+                       "the two must share one refresh, not each burn the same single-use token")
+    }
+
+    /// When the in-flight refresh FAILS, every caller joined to it wakes up at once. A single join
+    /// check let them all fall through and each start their own refresh, presenting the same
+    /// still-unspent token concurrently: the very race the join exists to prevent. Joining has to
+    /// re-check for a newer in-flight refresh, not assume one attempt settles it.
+    func testJoinersOfAFailedRefreshDoNotAllStartTheirOwn() async throws {
+        let stale = credential(expiresAtMs: 0, accessToken: "stale")
+        let keychain = FakeKeychain(stale)
+        let refresher = FlakyRefresher(result: credential(expiresAtMs: 99_000_000, accessToken: "refreshed"),
+                                       failures: 1)
+        let manager = TokenManager(keychain: keychain, refresher: refresher, writer: FakeWriter(),
+                                   clock: FixedClock(date: now))
+
+        // Three concurrent callers over one credential; the first attempt fails.
+        async let a = try? await manager.validAccessToken()
+        async let b = try? await manager.validAccessToken()
+        async let c = try? await manager.validAccessToken()
+        _ = await (a, b, c)
+
+        XCTAssertLessThanOrEqual(refresher.calls, 2,
+                                 "one failed attempt plus one retry, not one retry per caller")
+        let spentTwice = refresher.presented.filter { $0 == stale.refreshToken }.count
+        XCTAssertLessThanOrEqual(spentTwice, 2,
+                                 "the same single-use refresh token must not be presented three times")
     }
 }

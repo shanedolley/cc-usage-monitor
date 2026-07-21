@@ -60,7 +60,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         super.init()
     }
 
+    /// True when the process was launched to host the unit tests rather than to run the app.
+    ///
+    /// `xcodebuild test` uses the app as its test host, so this delegate runs for real on every test
+    /// run: it read the user's live Keychain credential interactively and raised a macOS dialog each
+    /// time (18 of 34 prompts on 2026-07-21 came from test runs alone). The tests drive the
+    /// components directly and need none of this, so the app shell stays inert under them.
+    private static var isRunningTests: Bool {
+        NSClassFromString("XCTestCase") != nil
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !Self.isRunningTests else { return }
+
         UNUserNotificationCenter.current().delegate = notificationService
         loadRules()
         observeSnapshotsForRules()
@@ -75,7 +87,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { _ = await notificationService.requestAuthorization() }
         // Establish the Keychain grant once (the only interactive Keychain prompt), then start the
         // poll loop, which reads non-interactively and never prompts again.
-        Task { await coordinator.startAfterEstablishingAccess() }
+        Task {
+            // Only Keychain mode needs the grant, and only Keychain mode can be prompted for it.
+            // File mode reads a file the app owns, so it starts straight into the poll loop and the
+            // user never sees a Keychain dialog.
+            if credentialSource.requiresKeychainGrant {
+                await coordinator.startAfterEstablishingAccess()
+            } else {
+                coordinator.start()
+            }
+        }
     }
 
     /// A menu bar accessory keeps running after its window closes.

@@ -38,4 +38,14 @@ enum CredentialSource {
     var offersSignIn: Bool {
         self == .keychain
     }
+
+    /// True when the app must ask macOS for access to Claude Code's Keychain item.
+    ///
+    /// Only Keychain mode does. File mode never reads the Keychain, so prompting there is pure
+    /// cost: Claude Code rewrites its Keychain item on every token refresh using
+    /// `security add-generic-password -U`, which rebuilds the item's access list from scratch and
+    /// deletes this app's grant. A grant taken in file mode would buy nothing and be erased anyway.
+    var requiresKeychainGrant: Bool {
+        self == .keychain
+    }
 }
